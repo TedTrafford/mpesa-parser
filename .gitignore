@@ -1,0 +1,21 @@
+# Data files
+Mpesa_pdf_statement/*.pdf
+Mpesa_csv_Statement_Parsed/*.csv
+debug/
+
+# MacOS files
+.DS_Store
+
+# Debug and temporary files
+*.txt
+!requirements.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/ 
