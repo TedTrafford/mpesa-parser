@@ -5,25 +5,64 @@ from datetime import datetime
 import os
 import glob
 import sys
+import hashlib
+import uuid
+import json
 
-# Add parent directory to path to import config
+# Add parent directory to path to import config and db package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    INPUT_DIR, OUTPUT_DIR, DEBUG_DIR, 
-    TRANSACTION_PATTERN, get_transaction_type, DATE_FORMAT
+    INPUT_DIR, OUTPUT_DIR, FAILED_DIR, DEBUG_DIR,
+    TRANSACTION_PATTERN, get_transaction_type, DATE_FORMAT,
 )
+from db.uploader import upload_to_mysql
 
 # Global variable for password from command line
 PASSWORD = None
 
+
+def compute_manifest_hash(pdf_path):
+    """
+    Compute an MD5 hash over the combination of the filename bytes and the raw
+    file content bytes.  This produces a single fingerprint that changes if
+    either the filename or the file contents change, making it suitable for
+    sync / dedup checks.
+    """
+    filename_bytes = os.path.basename(pdf_path).encode("utf-8")
+    with open(pdf_path, "rb") as f:
+        file_bytes = f.read()
+    digest = hashlib.md5(filename_bytes + file_bytes).hexdigest()
+    return digest
+
+
 def get_pdf_password(pdf_path):
-    """Extract password from PDF filename."""
+    """
+    Extract password from PDF filename.
+    The password is a 6-digit number that can appear in different formats:
+    1. Pure number: 123456.pdf -> password is 123456
+    2. With text prefix: Maniga123456.pdf -> password is 123456 (6-digit number)
+    3. Old format with underscore: 123456_something.pdf -> password is 123456
+    """
     if PASSWORD:
         return PASSWORD
         
     filename = os.path.basename(pdf_path)
-    # Extract numbers before the first underscore
-    password = filename.split('_')[0]
+    # Remove .pdf extension
+    base_name = filename.replace('.pdf', '')
+    
+    # Check if filename contains underscore (old format)
+    if '_' in base_name:
+        # Old format: Extract numbers before the first underscore
+        password = base_name.split('_')[0]
+    else:
+        # Try to extract 6-digit number from the filename
+        match = re.search(r'\d{6}', base_name)
+        if match:
+            password = match.group()
+        else:
+            # If no 6-digit number found, use the entire filename
+            password = base_name
+    
     return password
 
 def extract_text_from_pdf(pdf_path):
@@ -54,8 +93,53 @@ def extract_text_from_pdf(pdf_path):
     
     return text
 
+def extract_customer_info(text):
+    """Extract customer information from MPESA statement header."""
+    customer_info = {
+        'Customer Name': '',
+        'Mobile Number': '',
+        'Email Address': '',
+        'Statement Period': '',
+        'Request Date': ''
+    }
+    
+    # Extract customer name
+    name_match = re.search(r'Customer Name:\s*(.+)', text)
+    if name_match:
+        customer_info['Customer Name'] = name_match.group(1).strip()
+    
+    # Extract mobile number
+    mobile_match = re.search(r'Mobile Number:\s*(\d+)', text)
+    if mobile_match:
+        customer_info['Mobile Number'] = mobile_match.group(1).strip()
+    
+    # Extract email address
+    email_match = re.search(r'Email Address:\s*(.+)', text)
+    if email_match:
+        customer_info['Email Address'] = email_match.group(1).strip()
+    
+    # Extract statement period
+    period_match = re.search(r'Statement Period:\s*(.+)', text)
+    if period_match:
+        customer_info['Statement Period'] = period_match.group(1).strip()
+    
+    # Extract request date
+    request_match = re.search(r'Request Date:\s*(.+)', text)
+    if request_match:
+        customer_info['Request Date'] = request_match.group(1).strip()
+    
+    return customer_info
+
 def parse_mpesa_statement(text, pdf_path):
     """Parse MPESA statement text into structured data."""
+    print("Extracting customer information...")
+    
+    # Extract customer metadata
+    customer_info = extract_customer_info(text)
+    print(f"Customer: {customer_info['Customer Name']}")
+    print(f"Mobile: {customer_info['Mobile Number']}")
+    print(f"Period: {customer_info['Statement Period']}")
+    
     print("Preprocessing text to handle split transaction lines...")
     
     # First, preprocess the text to join split transaction lines
@@ -121,6 +205,11 @@ def parse_mpesa_statement(text, pdf_path):
             trans_type = get_transaction_type(details)
             
             transactions.append({
+                'Customer Name': customer_info['Customer Name'],
+                'Mobile Number': customer_info['Mobile Number'],
+                'Email Address': customer_info['Email Address'],
+                'Statement Period': customer_info['Statement Period'],
+                'Request Date': customer_info['Request Date'],
                 'Date': date_obj,
                 'Time': time_str,
                 'Receipt No': receipt_no,
@@ -135,6 +224,34 @@ def parse_mpesa_statement(text, pdf_path):
     
     print(f"Successfully processed {len(transactions)} transactions")
     return transactions
+
+def _attach_metadata(df, pdf_path, output_csv):
+    """
+    Append a 'metadata' column to *df* containing a JSON object per row with:
+
+    - manifest_hash  : MD5 of (filename bytes + file content bytes)
+    - pin            : source filename without the .pdf extension
+    - record_uuid    : a unique UUID4 for this individual transaction row
+    - output_file_path: absolute path to the CSV file where this row is stored
+    """
+    manifest_hash = compute_manifest_hash(pdf_path)
+    pin = os.path.splitext(os.path.basename(pdf_path))[0]
+    abs_output = os.path.abspath(output_csv)
+
+    df["metadata"] = [
+        json.dumps(
+            {
+                "manifest_hash": manifest_hash,
+                "pin": pin,
+                "record_uuid": str(uuid.uuid4()),
+                "output_file_path": abs_output,
+            },
+            separators=(",", ":"),
+        )
+        for _ in range(len(df))
+    ]
+    return df
+
 
 def process_pdf_file(pdf_path):
     """Process a single PDF file and save the output to CSV."""
@@ -159,14 +276,22 @@ def process_pdf_file(pdf_path):
     # Save to CSV with same name as PDF but with .csv extension
     base_filename = os.path.basename(pdf_path)
     output_csv = os.path.join(OUTPUT_DIR, base_filename.replace('.pdf', '.csv'))
+
+    df = _attach_metadata(df, pdf_path, output_csv)
+
     df.to_csv(output_csv, index=False)
     print(f"Data saved to {output_csv}")
-    
+
+    try:
+        upload_to_mysql(df)
+    except Exception as exc:
+        print(f"  DB upload failed (CSV still saved): {exc}")
+
     # Display DataFrame summary
     print(f"Total transactions in CSV: {len(df)}")
     print("\nFirst few transactions:")
     print(df.head())
-    
+
     return df
 
 def process_single_file(pdf_path, output_csv=None, password=None):
@@ -186,17 +311,24 @@ def process_single_file(pdf_path, output_csv=None, password=None):
     
     # Create DataFrame
     df = pd.DataFrame(transactions)
-    
+
     # Save to CSV
     if output_csv:
+        df = _attach_metadata(df, pdf_path, output_csv)
         df.to_csv(output_csv, index=False)
         print(f"Data saved to {output_csv}")
     else:
         # Use default naming with PDF filename
         base_filename = os.path.basename(pdf_path)
         default_output = os.path.join(OUTPUT_DIR, base_filename.replace('.pdf', '.csv'))
+        df = _attach_metadata(df, pdf_path, default_output)
         df.to_csv(default_output, index=False)
         print(f"Data saved to {default_output}")
+
+    try:
+        upload_to_mysql(df)
+    except Exception as exc:
+        print(f"  DB upload failed (CSV still saved): {exc}")
     
     # Display DataFrame summary
     print(f"Total transactions in CSV: {len(df)}")

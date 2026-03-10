@@ -4,9 +4,20 @@ import os
 # Base directory for the project
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# ---------------------------------------------------------------------------
+# MySQL database connection settings
+# ---------------------------------------------------------------------------
+DB_HOST = os.environ.get("MPESA_DB_HOST", "139.84.243.180")
+DB_PORT = int(os.environ.get("MPESA_DB_PORT", 3306))
+DB_NAME = os.environ.get("MPESA_DB_NAME", "Data_Science")
+DB_USER = os.environ.get("MPESA_DB_USER", "staging")
+DB_PASSWORD = os.environ.get("MPESA_DB_PASSWORD", "gQTnYQ8Xwh1nl0di1rbz")
+DB_TABLE = "tbl_raw_mpesa_statements"
+
 # Directory paths
 INPUT_DIR = os.path.join(BASE_DIR, "Mpesa_pdf_statement")
 OUTPUT_DIR = os.path.join(BASE_DIR, "Mpesa_csv_Statement_Parsed")
+FAILED_DIR = os.path.join(BASE_DIR, "Mpesa_csv_Statement_Failed")
 DEBUG_DIR = os.path.join(BASE_DIR, "debug")
 PARSER_SCRIPT = os.path.join(BASE_DIR, "parser", "mpesa_parser.py")
 

@@ -1,19 +1,25 @@
-# Data files
-Mpesa_pdf_statement/*.pdf
-Mpesa_csv_Statement_Parsed/*.csv
+# ── Data directories (never commit PDFs, CSVs, or debug output) ──────────────
+Mpesa_pdf_statement/
+Mpesa_csv_Statement_Parsed/
+Mpesa_csv_Statement_Failed/
 debug/
 
-# MacOS files
+# ── Archives ──────────────────────────────────────────────────────────────────
+*.zip
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
 
-# Debug and temporary files
+# ── Debug / temp text files ───────────────────────────────────────────────────
 *.txt
 !requirements.txt
 
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
 .env
 .venv
 env/
