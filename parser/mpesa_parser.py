@@ -12,7 +12,7 @@ import json
 # Add parent directory to path to import config and db package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    INPUT_DIR, OUTPUT_DIR, FAILED_DIR, DEBUG_DIR,
+    INPUT_DIR, OUTPUT_DIR, FAILED_DIR,
     TRANSACTION_PATTERN, get_transaction_type, DATE_FORMAT,
 )
 from db.uploader import upload_to_mysql
@@ -82,14 +82,6 @@ def extract_text_from_pdf(pdf_path):
     print(f"Extracted text length: {len(text)} characters")
     print("First 200 characters of extracted text:")
     print(text[:200])
-    
-    # Create a debug directory if it doesn't exist
-    os.makedirs(DEBUG_DIR, exist_ok=True)
-    
-    # Save the extracted text to a file for debugging
-    debug_filename = os.path.basename(pdf_path).replace('.pdf', '_extracted_text.txt')
-    with open(os.path.join(DEBUG_DIR, debug_filename), 'w') as f:
-        f.write(text)
     
     return text
 
@@ -172,10 +164,6 @@ def parse_mpesa_statement(text, pdf_path):
     # Join the processed lines back into text
     processed_text = '\n'.join(processed_lines)
     
-    # Save the processed text for debugging if needed
-    debug_filename = os.path.basename(pdf_path).replace('.pdf', '_processed_text.txt')
-    with open(os.path.join(DEBUG_DIR, debug_filename), 'w') as f:
-        f.write(processed_text)
     
     # Use the regex pattern from config to match transactions
     transactions = []
@@ -358,9 +346,7 @@ def main():
         # Process all files in the input directory
         print(f"No command-line arguments provided. Processing all PDFs in {INPUT_DIR}")
         
-        # Ensure directories exist
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        os.makedirs(DEBUG_DIR, exist_ok=True)
         
         # Get all PDF files in the input directory
         pdf_files = glob.glob(os.path.join(INPUT_DIR, '*.pdf'))

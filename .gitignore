@@ -3,6 +3,7 @@ Mpesa_pdf_statement/
 Mpesa_csv_Statement_Parsed/
 Mpesa_csv_Statement_Failed/
 debug/
+logs/
 
 # ── Archives ──────────────────────────────────────────────────────────────────
 *.zip

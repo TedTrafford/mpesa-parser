@@ -7,7 +7,72 @@ import subprocess
 import time
 import shutil
 import re
-from config import INPUT_DIR, OUTPUT_DIR, FAILED_DIR, PARSER_SCRIPT
+import hashlib
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+from config import INPUT_DIR, OUTPUT_DIR, FAILED_DIR, PARSER_SCRIPT, LOG_DIR
+
+LOG_FILE = os.path.join(LOG_DIR, "processing_log.log")
+_SEPARATOR = "-" * 60
+_RETENTION_YEARS = 3
+
+
+def _compute_md5(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_log(entry):
+    """Append a log entry and prune records older than _RETENTION_YEARS."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+    try:
+        start_dt = datetime.strptime(entry['start_timestamp'], "%Y-%m-%d %H:%M:%S")
+        end_dt   = datetime.strptime(entry['end_timestamp'],   "%Y-%m-%d %H:%M:%S")
+        duration = f"{(end_dt - start_dt).total_seconds():.2f}s"
+    except ValueError:
+        duration = "N/A"
+
+    new_block = (
+        f"filename  : {entry['filename']}\n"
+        f"md5       : {entry['md5']}\n"
+        f"start     : {entry['start_timestamp']}\n"
+        f"end       : {entry['end_timestamp']}\n"
+        f"duration  : {duration}\n"
+        f"status    : {entry['status']}\n"
+        f"error     : {entry['error']}"
+    )
+
+    cutoff = datetime.now() - relativedelta(years=_RETENTION_YEARS)
+    kept_blocks = []
+
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r") as f:
+            raw = f.read()
+
+        for block in raw.split(_SEPARATOR):
+            block = block.strip()
+            if not block:
+                continue
+            match = re.search(r'^start\s*:\s*(.+)$', block, re.MULTILINE)
+            if match:
+                try:
+                    ts = datetime.strptime(match.group(1).strip(), "%Y-%m-%d %H:%M:%S")
+                    if ts >= cutoff:
+                        kept_blocks.append(block)
+                except ValueError:
+                    kept_blocks.append(block)
+            else:
+                kept_blocks.append(block)
+
+    kept_blocks.append(new_block)
+
+    with open(LOG_FILE, "w") as f:
+        f.write(f"\n{_SEPARATOR}\n".join(kept_blocks))
+        f.write(f"\n{_SEPARATOR}\n")
 
 print("MPESA PDF Statement Batch Processor")
 print("----------------------------------")
@@ -63,12 +128,14 @@ for i, pdf_file in enumerate(pdf_files, 1):
             # If no 6-digit number found, use the entire filename
             password = base_name
     
+    # Compute MD5 before the file is moved
+    file_md5 = _compute_md5(pdf_file)
+
     # Run the parser script
     try:
-        start_time = time.time()
+        start_ts = datetime.now()
         print(f"Running parser with: {pdf_file}, {output_csv}, password: {password}")
-        
-        # Run the command
+
         result = subprocess.run([
             sys.executable,
             PARSER_SCRIPT,
@@ -76,39 +143,71 @@ for i, pdf_file in enumerate(pdf_files, 1):
             output_csv,
             password
         ], check=True, capture_output=True, text=True)
-        
-        end_time = time.time()
-        print(f"Processing completed in {end_time - start_time:.2f} seconds")
-        
+
+        end_ts = datetime.now()
+        print(f"Processing completed in {(end_ts - start_ts).total_seconds():.2f} seconds")
+
         # Verify output file was created
         if os.path.exists(output_csv):
             print(f"✓ Successfully created CSV file: {output_csv}")
             successful_files.append(base_filename)
-            # Move successfully processed PDF to parsed directory
+            _write_log({
+                "filename": base_filename,
+                "md5": file_md5,
+                "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "end_timestamp": end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "status": "SUCCESS",
+                "error": "",
+            })
             parsed_pdf_path = os.path.join(OUTPUT_DIR, base_filename)
             shutil.move(pdf_file, parsed_pdf_path)
             print(f"  Moved PDF to: {parsed_pdf_path}")
         else:
+            end_ts = datetime.now()
             print(f"✗ ERROR: Failed to create CSV file for {pdf_file}")
-            # Move failed file to failed directory
+            _write_log({
+                "filename": base_filename,
+                "md5": file_md5,
+                "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "end_timestamp": end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "status": "FAILED",
+                "error": "CSV output not created",
+            })
             failed_path = os.path.join(FAILED_DIR, base_filename)
             shutil.move(pdf_file, failed_path)
             print(f"  Moved failed PDF to: {failed_path}")
             failed_files.append(base_filename)
-    
+
     except subprocess.CalledProcessError as e:
+        end_ts = datetime.now()
+        error_msg = (e.stderr or str(e))[:500]
         print(f"✗ Error processing {pdf_file}: {str(e)}")
         if e.stderr:
             print(f"  Error details: {e.stderr}")
-        # Move failed file to failed directory
+        _write_log({
+            "filename": base_filename,
+            "md5": file_md5,
+            "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp": end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "FAILED",
+            "error": error_msg.replace("\n", " "),
+        })
         failed_path = os.path.join(FAILED_DIR, base_filename)
         shutil.move(pdf_file, failed_path)
         print(f"  Moved failed PDF to: {failed_path}")
         failed_files.append(base_filename)
-        
+
     except Exception as e:
+        end_ts = datetime.now()
         print(f"✗ Unexpected error processing {pdf_file}: {str(e)}")
-        # Move failed file to failed directory
+        _write_log({
+            "filename": base_filename,
+            "md5": file_md5,
+            "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp": end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "FAILED",
+            "error": str(e)[:500].replace("\n", " "),
+        })
         failed_path = os.path.join(FAILED_DIR, base_filename)
         shutil.move(pdf_file, failed_path)
         print(f"  Moved failed PDF to: {failed_path}")

@@ -18,7 +18,7 @@ DB_TABLE = "tbl_raw_mpesa_statements"
 INPUT_DIR = os.path.join(BASE_DIR, "Mpesa_pdf_statement")
 OUTPUT_DIR = os.path.join(BASE_DIR, "Mpesa_csv_Statement_Parsed")
 FAILED_DIR = os.path.join(BASE_DIR, "Mpesa_csv_Statement_Failed")
-DEBUG_DIR = os.path.join(BASE_DIR, "debug")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
 PARSER_SCRIPT = os.path.join(BASE_DIR, "parser", "mpesa_parser.py")
 
 # Regex pattern for parsing MPESA transactions
