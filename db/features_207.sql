@@ -29,6 +29,7 @@
 
 -- customer_ref: one row per mobile_number, holding their latest transaction date
 -- as the rolling-window anchor (avoids data leakage from future rows)
+create table tbl_model_feature_variables as 
 WITH customer_ref AS (
     SELECT
         mobile_number,

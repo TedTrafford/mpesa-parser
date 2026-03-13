@@ -10,12 +10,15 @@ conda create -n mpesa_parser python=3.9 -y
 conda activate mpesa_parser
 
 # 2. Install dependencies
-pip install PyPDF2==3.0.1 "numpy<2.0" pandas==2.0.0
+pip install -r requirements.txt
 
 # 3. Place your PDF files in Mpesa_pdf_statement/
 
-# 4. Run the parser
+# 4a. Batch-process all PDFs
 ./run_parser.sh
+
+# 4b. Parse a single PDF (queued, safe for concurrent callers)
+python parse_single.py <record_id> <file_name> <pdf_path> <pin>
 ```
 
 ## Requirements
@@ -54,11 +57,21 @@ pip install PyPDF2==3.0.1 pandas==2.0.0
 ├── Mpesa_pdf_statement/          # Input: Place PDF files here
 ├── Mpesa_csv_Statement_Parsed/   # Output: Successful CSVs and PDFs
 ├── Mpesa_csv_Statement_Failed/   # Failed: PDFs that couldn't be parsed
+├── queue/                        # Runtime queue (git-ignored)
+│   ├── pending/                  #   Jobs waiting to be processed
+│   ├── done/                     #   Completed job descriptors
+│   ├── failed/                   #   Failed job descriptors
+│   └── worker.lock               #   Advisory lock (one worker at a time)
 ├── parser/                       # Parser module
-│   └── mpesa_parser.py          # Main parser script
-├── config.py                     # Configuration file
+│   └── mpesa_parser.py          # Core parser + process_single_file()
+├── db/
+│   ├── schema.sql                # MySQL table DDL
+│   ├── uploader.py               # MySQL upload helper
+│   └── features_207.sql          # 207-feature credit-scoring SQL query
+├── config.py                     # Paths, DB credentials, regex patterns
+├── parse_single.py               # Single-file queued parser (new)
 ├── process_all_pdfs.py          # Batch processor
-├── run_parser.sh                # Quick run script
+├── run_parser.sh                # Quick batch-run script
 ├── requirements.txt             # Python dependencies
 └── README.md                    # This file
 ```
@@ -74,48 +87,67 @@ Edit the `config.py` file instead of modifying individual scripts.
 
 ## How to Use
 
-### Option 1: Process all PDF statements at once (with Anaconda)
+### Option 1: Batch-process all PDFs (with Anaconda)
 
 ```bash
-# Make sure conda environment is activated
 conda activate mpesa_parser
-
-# Run the parser using the provided script
 ./run_parser.sh
 ```
 
-OR run directly:
+Or directly:
 
 ```bash
-conda activate mpesa_parser
 python process_all_pdfs.py
 ```
 
-### Option 2: Without Anaconda
+### Option 2: Parse a single file with queueing (`parse_single.py`)
+
+Use this when integrating with an external system (e.g. a web application)
+that submits one statement at a time and may call the script concurrently.
 
 ```bash
-python3 process_all_pdfs.py
+python parse_single.py <record_id> <file_name> <pdf_path> <pin>
 ```
 
-### Option 2: Process a single PDF file
+| Argument | Description |
+|----------|-------------|
+| `record_id` | Caller-supplied unique identifier (e.g. a database application ID). Stored in the `metadata` JSON column of every transaction row. |
+| `file_name` | Original PDF filename (e.g. `310549.pdf`). The output CSV uses the same stem. |
+| `pdf_path` | Path to the PDF file on disk. |
+| `pin` | PDF password used to decrypt the M-PESA statement. |
+
+**Examples:**
+
+```bash
+# Minimal call — record_id ties this parse back to your application record
+python parse_single.py 12345 310549.pdf /tmp/statements/310549.pdf 310549
+
+# Absolute path
+python parse_single.py app-req-9f3a statement.pdf /var/uploads/statement.pdf 123456
+```
+
+**Concurrency behaviour:**
+
+When multiple processes call `parse_single.py` at the same time each one
+atomically writes a job file to `queue/pending/` and then attempts to acquire
+an exclusive advisory lock (`queue/worker.lock`).
+
+- The **first caller** that wins the lock becomes the worker and processes all
+  pending jobs in arrival order before releasing the lock.
+- **Subsequent callers** that lose the lock exit immediately after enqueuing —
+  their job is picked up by the running worker in the same drain loop.
+
+Completed job descriptors are archived to `queue/done/`; failed ones to
+`queue/failed/` for inspection.
+
+### Option 3: Call the parser directly (no queue)
 
 ```bash
 python parser/mpesa_parser.py <pdf_path> [output_csv] [password]
 ```
 
-Examples:
-
 ```bash
-# Process a single file with pure number filename
 python parser/mpesa_parser.py Mpesa_pdf_statement/288720.pdf
-
-# Process a file with text prefix
-python parser/mpesa_parser.py Mpesa_pdf_statement/Maniga953060.pdf
-
-# Process a single file with old naming format
-python parser/mpesa_parser.py Mpesa_pdf_statement/123456_MPESA_Statement.pdf
-
-# Specify output location and password explicitly
 python parser/mpesa_parser.py Mpesa_pdf_statement/288720.pdf output.csv 288720
 ```
 
@@ -148,7 +180,7 @@ python parser/mpesa_parser.py Mpesa_pdf_statement/288720.pdf output.csv 288720
 
 ## CSV Output Format
 
-Each CSV file contains **12 columns** with complete customer and transaction information:
+Each CSV file contains **13 columns** with complete customer and transaction information:
 
 | Column | Description | Example |
 |--------|-------------|---------|
@@ -164,6 +196,29 @@ Each CSV file contains **12 columns** with complete customer and transaction inf
 | Details | Full description | Customer Transfer to... |
 | Amount | Transaction amount | -1500.0 |
 | Balance | Balance after | 5432.10 |
+| metadata | JSON with parse provenance | see below |
+
+### `metadata` column
+
+Every row carries a `metadata` JSON object:
+
+```json
+{
+  "manifest_hash":    "85779f75f98d0eed022ccd597cc7845f",
+  "pin":              "310549",
+  "record_uuid":      "3829cdd5-6e40-4be4-bf9a-3b35dfca8ebd",
+  "output_file_path": "/path/to/Mpesa_csv_Statement_Parsed/310549.csv",
+  "record_id":        "12345"
+}
+```
+
+| Key | Set by | Description |
+|-----|--------|-------------|
+| `manifest_hash` | parser | MD5 of filename + file contents — changes if the file is replaced |
+| `pin` | parser | PDF stem (the M-PESA PIN used as password) |
+| `record_uuid` | parser | UUID4 unique to this transaction row |
+| `output_file_path` | parser | Absolute path to the output CSV |
+| `record_id` | caller | The `record_id` argument passed to `parse_single.py` (omitted when the parser is invoked directly) |
 
 ## Troubleshooting
 

@@ -5,6 +5,9 @@ Mpesa_csv_Statement_Failed/
 debug/
 logs/
 
+# ── Queue runtime files (job descriptors and worker lock) ─────────────────────
+queue/
+
 # ── Archives ──────────────────────────────────────────────────────────────────
 *.zip
 
