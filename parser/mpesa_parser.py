@@ -271,10 +271,7 @@ def process_pdf_file(pdf_path):
     df.to_csv(output_csv, index=False)
     print(f"Data saved to {output_csv}")
 
-    try:
-        upload_to_mysql(df)
-    except Exception as exc:
-        print(f"  DB upload failed (CSV still saved): {exc}")
+    upload_to_mysql(df)
 
     # Display DataFrame summary
     print(f"Total transactions in CSV: {len(df)}")
@@ -322,10 +319,7 @@ def process_single_file(pdf_path, output_csv=None, password=None, record_id=None
         df.to_csv(default_output, index=False)
         print(f"Data saved to {default_output}")
 
-    try:
-        upload_to_mysql(df)
-    except Exception as exc:
-        print(f"  DB upload failed (CSV still saved): {exc}")
+    upload_to_mysql(df)
 
     print(f"Total transactions in CSV: {len(df)}")
     print("\nFirst few transactions:")

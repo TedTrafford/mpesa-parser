@@ -11,13 +11,27 @@ parser against the same PDF will not create duplicate records.
 
 import os
 import sys
+import traceback
+from datetime import datetime, timezone
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
 # Allow imports from the project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_TABLE
+from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_TABLE, LOG_DIR
+
+_DB_ERROR_LOG = os.path.join(LOG_DIR, "db_errors.log")
+
+
+def _log_db_error(context: str, exc: Exception) -> None:
+    """Append a timestamped error entry to db_errors.log."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(_DB_ERROR_LOG, "a") as fh:
+        fh.write(f"\n[{ts}] {context}\n")
+        fh.write(traceback.format_exc())
+        fh.write("\n")
 
 # ---------------------------------------------------------------------------
 # Column rename map: DataFrame column  →  MySQL column
@@ -158,37 +172,43 @@ def upload_to_mysql(df: pd.DataFrame) -> int:
     - Uses INSERT IGNORE so duplicate receipt numbers are silently skipped.
 
     Returns the number of new rows inserted.
+    Raises on any DB error after writing the full traceback to logs/db_errors.log.
     """
-    engine = get_engine()
-    ensure_table_exists()
+    try:
+        engine = get_engine()
+        ensure_table_exists()
 
-    # Rename + keep only known columns
-    df_upload = df.rename(columns=COLUMN_MAP)
-    sql_cols = [c for c in COLUMN_MAP.values() if c in df_upload.columns]
-    df_upload = df_upload[sql_cols].copy()
+        # Rename + keep only known columns
+        df_upload = df.rename(columns=COLUMN_MAP)
+        sql_cols = [c for c in COLUMN_MAP.values() if c in df_upload.columns]
+        df_upload = df_upload[sql_cols].copy()
 
-    # Coerce Date column to Python date so SQLAlchemy maps it to MySQL DATE
-    if "transaction_date" in df_upload.columns:
-        df_upload["transaction_date"] = pd.to_datetime(
-            df_upload["transaction_date"]
-        ).dt.date
+        # Coerce Date column to Python date so SQLAlchemy maps it to MySQL DATE
+        if "transaction_date" in df_upload.columns:
+            df_upload["transaction_date"] = pd.to_datetime(
+                df_upload["transaction_date"]
+            ).dt.date
 
-    before = _row_count(engine)
+        before = _row_count(engine)
 
-    df_upload.to_sql(
-        DB_TABLE,
-        con=engine,
-        if_exists="append",
-        index=False,
-        method=_insert_ignore,
-        chunksize=500,
-    )
+        df_upload.to_sql(
+            DB_TABLE,
+            con=engine,
+            if_exists="append",
+            index=False,
+            method=_insert_ignore,
+            chunksize=500,
+        )
 
-    after = _row_count(engine)
-    inserted = after - before
-    skipped = len(df_upload) - inserted
-    print(
-        f"  DB: {inserted} new row(s) inserted into `{DB_TABLE}`"
-        + (f", {skipped} duplicate(s) skipped" if skipped else "")
-    )
-    return inserted
+        after = _row_count(engine)
+        inserted = after - before
+        skipped = len(df_upload) - inserted
+        print(
+            f"  DB: {inserted} new row(s) inserted into `{DB_TABLE}`"
+            + (f", {skipped} duplicate(s) skipped" if skipped else "")
+        )
+        return inserted
+
+    except Exception as exc:
+        _log_db_error(f"upload_to_mysql failed: {exc}", exc)
+        raise
