@@ -37,12 +37,16 @@ Exit codes
 
 import fcntl
 import glob
+import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import uuid
 from datetime import datetime, timezone
+
+from dateutil.relativedelta import relativedelta
 
 # ── project root on sys.path ──────────────────────────────────────────────────
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +60,79 @@ _PENDING_DIR  = os.path.join(_QUEUE_ROOT, "pending")
 _DONE_DIR     = os.path.join(_QUEUE_ROOT, "done")
 _FAILED_DIR   = os.path.join(_QUEUE_ROOT, "failed")
 _LOCK_FILE    = os.path.join(_QUEUE_ROOT, "worker.lock")
+
+# ── logging ───────────────────────────────────────────────────────────────────
+_LOG_FILE         = os.path.join(LOG_DIR, "processing_log.log")
+_SEPARATOR        = "-" * 60
+_RETENTION_YEARS  = 3
+
+
+def _compute_md5(path: str) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_log(entry: dict) -> None:
+    """Append one log block and prune entries older than _RETENTION_YEARS.
+
+    Extended fields compared to process_all_pdfs.py:
+        source       — always 'parse_single.py'
+        source_path  — absolute path to the input PDF
+        destination  — absolute path to the output CSV
+        record_id    — caller-supplied unique identifier
+    """
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+    try:
+        start_dt = datetime.strptime(entry["start_timestamp"], "%Y-%m-%d %H:%M:%S")
+        end_dt   = datetime.strptime(entry["end_timestamp"],   "%Y-%m-%d %H:%M:%S")
+        duration = f"{(end_dt - start_dt).total_seconds():.2f}s"
+    except ValueError:
+        duration = "N/A"
+
+    new_block = (
+        f"filename    : {entry['filename']}\n"
+        f"md5         : {entry['md5']}\n"
+        f"source      : parse_single.py\n"
+        f"source_path : {entry['source_path']}\n"
+        f"destination : {entry['destination']}\n"
+        f"record_id   : {entry['record_id']}\n"
+        f"start       : {entry['start_timestamp']}\n"
+        f"end         : {entry['end_timestamp']}\n"
+        f"duration    : {duration}\n"
+        f"status      : {entry['status']}\n"
+        f"error       : {entry['error']}"
+    )
+
+    cutoff = datetime.now() - relativedelta(years=_RETENTION_YEARS)
+    kept_blocks = []
+
+    if os.path.exists(_LOG_FILE):
+        with open(_LOG_FILE, "r") as fh:
+            raw = fh.read()
+        for block in raw.split(_SEPARATOR):
+            block = block.strip()
+            if not block:
+                continue
+            match = re.search(r"^start\s*:\s*(.+)$", block, re.MULTILINE)
+            if match:
+                try:
+                    ts = datetime.strptime(match.group(1).strip(), "%Y-%m-%d %H:%M:%S")
+                    if ts >= cutoff:
+                        kept_blocks.append(block)
+                except ValueError:
+                    kept_blocks.append(block)
+            else:
+                kept_blocks.append(block)
+
+    kept_blocks.append(new_block)
+
+    with open(_LOG_FILE, "w") as fh:
+        fh.write(f"\n{_SEPARATOR}\n".join(kept_blocks))
+        fh.write(f"\n{_SEPARATOR}\n")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -115,16 +192,47 @@ def _process_job(job: dict) -> bool:
         f"[worker] processing  job_id={job['job_id']}"
         f"  record_id={record_id}  pdf={pdf_path}"
     )
+
+    file_md5  = _compute_md5(pdf_path)
+    start_ts  = datetime.now()
+
     try:
-        result = process_single_file(
+        result   = process_single_file(
             pdf_path=pdf_path,
             output_csv=output_csv,
             password=pin,
             record_id=record_id,
         )
-        return result is not None
+        end_ts   = datetime.now()
+        success  = result is not None
+        _write_log({
+            "filename":        file_name,
+            "md5":             file_md5,
+            "source_path":     os.path.abspath(pdf_path),
+            "destination":     os.path.abspath(output_csv),
+            "record_id":       record_id,
+            "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":          "SUCCESS" if success else "FAILED",
+            "error":           "" if success else "process_single_file returned None",
+        })
+        return success
+
     except Exception as exc:
+        end_ts = datetime.now()
+        error_msg = str(exc)[:500].replace("\n", " ")
         print(f"[worker] ERROR  job_id={job['job_id']}: {exc}", file=sys.stderr)
+        _write_log({
+            "filename":        file_name,
+            "md5":             file_md5,
+            "source_path":     os.path.abspath(pdf_path),
+            "destination":     os.path.abspath(output_csv),
+            "record_id":       record_id,
+            "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":          "FAILED",
+            "error":           error_msg,
+        })
         return False
 
 

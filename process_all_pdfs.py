@@ -37,13 +37,17 @@ def _write_log(entry):
         duration = "N/A"
 
     new_block = (
-        f"filename  : {entry['filename']}\n"
-        f"md5       : {entry['md5']}\n"
-        f"start     : {entry['start_timestamp']}\n"
-        f"end       : {entry['end_timestamp']}\n"
-        f"duration  : {duration}\n"
-        f"status    : {entry['status']}\n"
-        f"error     : {entry['error']}"
+        f"filename    : {entry['filename']}\n"
+        f"md5         : {entry['md5']}\n"
+        f"source      : {entry.get('source', 'process_all_pdfs.py')}\n"
+        f"source_path : {entry.get('source_path', '')}\n"
+        f"destination : {entry.get('destination', '')}\n"
+        f"record_id   : {entry.get('record_id', '')}\n"
+        f"start       : {entry['start_timestamp']}\n"
+        f"end         : {entry['end_timestamp']}\n"
+        f"duration    : {duration}\n"
+        f"status      : {entry['status']}\n"
+        f"error       : {entry['error']}"
     )
 
     cutoff = datetime.now() - relativedelta(years=_RETENTION_YEARS)
@@ -152,12 +156,15 @@ for i, pdf_file in enumerate(pdf_files, 1):
             print(f"✓ Successfully created CSV file: {output_csv}")
             successful_files.append(base_filename)
             _write_log({
-                "filename": base_filename,
-                "md5": file_md5,
+                "filename":        base_filename,
+                "md5":             file_md5,
+                "source":          "process_all_pdfs.py",
+                "source_path":     os.path.abspath(pdf_file),
+                "destination":     os.path.abspath(output_csv),
                 "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-                "end_timestamp": end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-                "status": "SUCCESS",
-                "error": "",
+                "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "status":          "SUCCESS",
+                "error":           "",
             })
             parsed_pdf_path = os.path.join(OUTPUT_DIR, base_filename)
             shutil.move(pdf_file, parsed_pdf_path)
@@ -166,12 +173,15 @@ for i, pdf_file in enumerate(pdf_files, 1):
             end_ts = datetime.now()
             print(f"✗ ERROR: Failed to create CSV file for {pdf_file}")
             _write_log({
-                "filename": base_filename,
-                "md5": file_md5,
+                "filename":        base_filename,
+                "md5":             file_md5,
+                "source":          "process_all_pdfs.py",
+                "source_path":     os.path.abspath(pdf_file),
+                "destination":     os.path.abspath(output_csv),
                 "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-                "end_timestamp": end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-                "status": "FAILED",
-                "error": "CSV output not created",
+                "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "status":          "FAILED",
+                "error":           "CSV output not created",
             })
             failed_path = os.path.join(FAILED_DIR, base_filename)
             shutil.move(pdf_file, failed_path)
@@ -185,12 +195,15 @@ for i, pdf_file in enumerate(pdf_files, 1):
         if e.stderr:
             print(f"  Error details: {e.stderr}")
         _write_log({
-            "filename": base_filename,
-            "md5": file_md5,
+            "filename":        base_filename,
+            "md5":             file_md5,
+            "source":          "process_all_pdfs.py",
+            "source_path":     os.path.abspath(pdf_file),
+            "destination":     os.path.abspath(output_csv),
             "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_timestamp": end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "FAILED",
-            "error": error_msg.replace("\n", " "),
+            "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":          "FAILED",
+            "error":           error_msg.replace("\n", " "),
         })
         failed_path = os.path.join(FAILED_DIR, base_filename)
         shutil.move(pdf_file, failed_path)
@@ -201,12 +214,15 @@ for i, pdf_file in enumerate(pdf_files, 1):
         end_ts = datetime.now()
         print(f"✗ Unexpected error processing {pdf_file}: {str(e)}")
         _write_log({
-            "filename": base_filename,
-            "md5": file_md5,
+            "filename":        base_filename,
+            "md5":             file_md5,
+            "source":          "process_all_pdfs.py",
+            "source_path":     os.path.abspath(pdf_file),
+            "destination":     os.path.abspath(output_csv),
             "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_timestamp": end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "FAILED",
-            "error": str(e)[:500].replace("\n", " "),
+            "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":          "FAILED",
+            "error":           str(e)[:500].replace("\n", " "),
         })
         failed_path = os.path.join(FAILED_DIR, base_filename)
         shutil.move(pdf_file, failed_path)
