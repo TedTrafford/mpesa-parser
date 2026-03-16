@@ -155,7 +155,7 @@ def _enqueue(record_id: str, file_name: str, pdf_path: str, pin: str) -> str:
         "job_id":               job_id,
         "record_id":            record_id,
         "file_name":            file_name,
-        "pdf_path":             os.path.abspath(pdf_path),
+        "pdf_path":             pdf_path,
         "pin":                  pin,
         "status":               "queued",
         "queued_at":            _utc_now(),
@@ -331,6 +331,12 @@ def main() -> None:
         sys.exit(1)
 
     _, record_id, file_name, pdf_path, pin = sys.argv
+
+    # Guard against callers that strip the leading slash from an absolute path.
+    # os.path.abspath() would otherwise prepend CWD and produce a doubled path
+    # (e.g. /srv/app/var/www/host/storage/…).
+    if not os.path.isabs(pdf_path):
+        pdf_path = os.sep + pdf_path
 
     if not os.path.isfile(pdf_path):
         print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
