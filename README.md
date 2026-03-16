@@ -178,47 +178,47 @@ python parser/mpesa_parser.py Mpesa_pdf_statement/288720.pdf output.csv 288720
 - Centralized configuration for easy customization
 - Detailed processing summary showing successes and failures
 
-## CSV Output Format
+## CSV / Database Output Format
 
-Each CSV file contains **13 columns** with complete customer and transaction information:
+Each parsed statement produces **14 columns** (CSV and database table):
 
-| Column | Description | Example |
-|--------|-------------|---------|
-| Customer Name | Account holder name | Monica Atieno Ondoo |
-| Mobile Number | M-PESA number | 0112850906 |
-| Email Address | Email on account | info@aleza.co.ke |
-| Statement Period | Date range | 14 Aug 2024 - 14 Feb 2025 |
-| Request Date | Statement generated | 14 Feb 2025 |
-| Date | Transaction date | 2025-02-14 |
-| Time | Transaction time | 14:30:45 |
-| Receipt No | M-PESA receipt | TJEKA7E3VO |
-| Transaction Type | Category | SEND MONEY |
-| Details | Full description | Customer Transfer to... |
-| Amount | Transaction amount | -1500.0 |
-| Balance | Balance after | 5432.10 |
-| metadata | JSON with parse provenance | see below |
+| Column | DB column | Description | Example |
+|--------|-----------|-------------|---------|
+| Record ID | `record_id` | Caller-supplied unique identifier (empty for batch runs) | `12345` |
+| Customer Name | `customer_name` | Account holder name | Monica Atieno Ondoo |
+| Mobile Number | `mobile_number` | M-PESA number | 0112850906 |
+| Email Address | `email_address` | Email on account | info@aleza.co.ke |
+| Statement Period | `statement_period` | Date range | 14 Aug 2024 - 14 Feb 2025 |
+| Request Date | `request_date` | Statement generated | 14 Feb 2025 |
+| Date | `transaction_date` | Transaction date | 2025-02-14 |
+| Time | `transaction_time` | Transaction time | 14:30:45 |
+| Receipt No | `receipt_no` | M-PESA receipt (unique) | TJEKA7E3VO |
+| Transaction Type | `transaction_type` | Category | SEND MONEY |
+| Details | `details` | Full description | Customer Transfer to... |
+| Amount | `amount` | Signed transaction amount | -1500.0 |
+| Balance | `balance` | Balance after transaction | 5432.10 |
+| metadata | `metadata` | JSON parse-provenance object | see below |
 
 ### `metadata` column
 
-Every row carries a `metadata` JSON object:
+Every row carries a `metadata` JSON object with parse-level provenance.
+The caller-supplied identifier is stored separately in `record_id`, not here.
 
 ```json
 {
   "manifest_hash":    "85779f75f98d0eed022ccd597cc7845f",
   "pin":              "310549",
   "record_uuid":      "3829cdd5-6e40-4be4-bf9a-3b35dfca8ebd",
-  "output_file_path": "/path/to/Mpesa_csv_Statement_Parsed/310549.csv",
-  "record_id":        "12345"
+  "output_file_path": "/path/to/Mpesa_csv_Statement_Parsed/310549.csv"
 }
 ```
 
-| Key | Set by | Description |
-|-----|--------|-------------|
-| `manifest_hash` | parser | MD5 of filename + file contents — changes if the file is replaced |
-| `pin` | parser | PDF stem (the M-PESA PIN used as password) |
-| `record_uuid` | parser | UUID4 unique to this transaction row |
-| `output_file_path` | parser | Absolute path to the output CSV |
-| `record_id` | caller | The `record_id` argument passed to `parse_single.py` (omitted when the parser is invoked directly) |
+| Key | Description |
+|-----|-------------|
+| `manifest_hash` | MD5 of filename + file contents — changes if the file is replaced |
+| `pin` | PDF stem (the M-PESA PIN used as password) |
+| `record_uuid` | UUID4 unique to this transaction row |
+| `output_file_path` | Absolute path to the output CSV |
 
 ## Troubleshooting
 

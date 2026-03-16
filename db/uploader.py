@@ -23,6 +23,7 @@ from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_TABLE
 # Column rename map: DataFrame column  →  MySQL column
 # ---------------------------------------------------------------------------
 COLUMN_MAP = {
+    "Record ID":        "record_id",
     "Customer Name":    "customer_name",
     "Mobile Number":    "mobile_number",
     "Email Address":    "email_address",
@@ -44,6 +45,7 @@ COLUMN_MAP = {
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `{table}` (
     `id`                BIGINT UNSIGNED     NOT NULL AUTO_INCREMENT,
+    `record_id`         VARCHAR(255)        NOT NULL DEFAULT '',
     `customer_name`     VARCHAR(255)        NOT NULL DEFAULT '',
     `mobile_number`     VARCHAR(20)         NOT NULL DEFAULT '',
     `email_address`     VARCHAR(255)        NOT NULL DEFAULT '',
@@ -58,12 +60,49 @@ CREATE TABLE IF NOT EXISTS `{table}` (
     `balance`           DECIMAL(15, 2)      NOT NULL,
     `metadata`          JSON                NOT NULL,
     PRIMARY KEY (`id`),
-    UNIQUE KEY  `uq_receipt_no` (`receipt_no`),
-    INDEX       `idx_mobile_number`   (`mobile_number`),
+    UNIQUE KEY  `uq_receipt_no`        (`receipt_no`),
+    INDEX       `idx_record_id`        (`record_id`),
+    INDEX       `idx_mobile_number`    (`mobile_number`),
     INDEX       `idx_transaction_date` (`transaction_date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='Raw M-PESA statement transactions parsed from PDF files'
 """.format(table=DB_TABLE)
+
+def _migrate_record_id(conn) -> None:
+    """
+    Add the record_id column and its index to an existing table.
+
+    Uses INFORMATION_SCHEMA checks so this is safe to call on every startup —
+    it is a no-op when the column / index already exist.  Avoids
+    ADD COLUMN IF NOT EXISTS / ADD INDEX IF NOT EXISTS, which are MariaDB-only
+    syntax and raise a syntax error on MySQL.
+    """
+    col_exists = conn.execute(text("""
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = :tbl
+          AND COLUMN_NAME  = 'record_id'
+    """), {"tbl": DB_TABLE}).scalar()
+
+    if not col_exists:
+        conn.execute(text(f"""
+            ALTER TABLE `{DB_TABLE}`
+                ADD COLUMN `record_id` VARCHAR(255) NOT NULL DEFAULT ''
+                    COMMENT 'Caller-supplied unique identifier from parse_single.py'
+                    AFTER `id`
+        """))
+
+    idx_exists = conn.execute(text("""
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = :tbl
+          AND INDEX_NAME   = 'idx_record_id'
+    """), {"tbl": DB_TABLE}).scalar()
+
+    if not idx_exists:
+        conn.execute(text(f"""
+            ALTER TABLE `{DB_TABLE}` ADD INDEX `idx_record_id` (`record_id`)
+        """))
 
 
 # ---------------------------------------------------------------------------
@@ -84,10 +123,12 @@ def get_engine():
 
 
 def ensure_table_exists():
-    """Create tbl_raw_mpesa_statements if it does not already exist."""
+    """Create tbl_raw_mpesa_statements if it does not already exist,
+    and add record_id to tables that predate that column."""
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text(_CREATE_TABLE_SQL))
+        _migrate_record_id(conn)
     print(f"  DB: table `{DB_TABLE}` is ready")
 
 
