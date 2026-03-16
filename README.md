@@ -111,7 +111,7 @@ python parse_single.py <record_id> <file_name> <pdf_path> <pin>
 
 | Argument | Description |
 |----------|-------------|
-| `record_id` | Caller-supplied unique identifier (e.g. a database application ID). Stored in the `metadata` JSON column of every transaction row. |
+| `record_id` | Caller-supplied unique identifier (e.g. a database application ID). Stored in the dedicated `record_id` database column of every transaction row. |
 | `file_name` | Original PDF filename (e.g. `310549.pdf`). The output CSV uses the same stem. |
 | `pdf_path` | Path to the PDF file on disk. |
 | `pin` | PDF password used to decrypt the M-PESA statement. |
@@ -126,6 +126,44 @@ python parse_single.py 12345 310549.pdf /tmp/statements/310549.pdf 310549
 python parse_single.py app-req-9f3a statement.pdf /var/uploads/statement.pdf 123456
 ```
 
+**Job status lifecycle:**
+
+Every job is tracked through four stages. The current stage is stored in
+the `status` field of the job's JSON file, together with a timestamp for
+each transition:
+
+| Status | Meaning | File location |
+|--------|---------|---------------|
+| `queued` | Job written to queue, waiting for a worker | `queue/pending/` |
+| `processing` | Worker has picked up the job and is parsing | `queue/pending/` |
+| `success` | Parse completed successfully | `queue/done/` |
+| `failed` | Parse failed (see `error` field) | `queue/failed/` |
+
+A job file while processing looks like:
+
+```json
+{
+  "job_id":               "abc-123",
+  "record_id":            "LOAN-001",
+  "file_name":            "310549.pdf",
+  "pdf_path":             "/abs/path/310549.pdf",
+  "pin":                  "310549",
+  "status":               "processing",
+  "queued_at":            "2026-03-13T10:22:00Z",
+  "processing_started_at": "2026-03-13T10:22:01Z",
+  "completed_at":         null,
+  "error":                null
+}
+```
+
+The terminal output mirrors each transition:
+
+```
+[queue]  status=queued      job_id=abc-123  record_id=LOAN-001
+[worker] status=processing  job_id=abc-123  record_id=LOAN-001  pdf=...
+[worker] status=success     job_id=abc-123
+```
+
 **Concurrency behaviour:**
 
 When multiple processes call `parse_single.py` at the same time each one
@@ -137,8 +175,8 @@ an exclusive advisory lock (`queue/worker.lock`).
 - **Subsequent callers** that lose the lock exit immediately after enqueuing —
   their job is picked up by the running worker in the same drain loop.
 
-Completed job descriptors are archived to `queue/done/`; failed ones to
-`queue/failed/` for inspection.
+Completed job descriptors (with full timestamps and final status) are archived
+to `queue/done/`; failed ones to `queue/failed/` for inspection.
 
 ### Option 3: Call the parser directly (no queue)
 

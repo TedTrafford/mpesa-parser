@@ -152,12 +152,16 @@ def _enqueue(record_id: str, file_name: str, pdf_path: str, pin: str) -> str:
 
     job_id = str(uuid.uuid4())
     job = {
-        "job_id":    job_id,
-        "record_id": record_id,
-        "file_name": file_name,
-        "pdf_path":  os.path.abspath(pdf_path),
-        "pin":       pin,
-        "queued_at": _utc_now(),
+        "job_id":               job_id,
+        "record_id":            record_id,
+        "file_name":            file_name,
+        "pdf_path":             os.path.abspath(pdf_path),
+        "pin":                  pin,
+        "status":               "queued",
+        "queued_at":            _utc_now(),
+        "processing_started_at": None,
+        "completed_at":         None,
+        "error":                None,
     }
 
     dest = os.path.join(_PENDING_DIR, f"{job_id}.json")
@@ -166,45 +170,57 @@ def _enqueue(record_id: str, file_name: str, pdf_path: str, pin: str) -> str:
         json.dump(job, fh, indent=2)
     os.replace(tmp, dest)           # atomic on POSIX
 
-    print(f"[queue] enqueued  job_id={job_id}  record_id={record_id}")
+    print(f"[queue] status=queued  job_id={job_id}  record_id={record_id}")
     return job_id
 
 
-def _process_job(job: dict) -> bool:
+def _update_job_file(job_file: str, **fields) -> dict:
+    """Read the job JSON at *job_file*, merge *fields*, write back atomically.
+
+    Returns the updated job dict.
     """
-    Execute a single queued job.  Returns True on success, False on failure.
+    with open(job_file) as fh:
+        job = json.load(fh)
+    job.update(fields)
+    tmp = job_file + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(job, fh, indent=2)
+    os.replace(tmp, job_file)
+    return job
+
+
+def _process_job(job: dict) -> tuple:
+    """Execute a single queued job.
+
+    Returns ``(success: bool, error_msg: str)``.
 
     Imports are intentionally deferred so that import errors surface as
     per-job failures rather than crashing the whole worker process.
     """
     from parser.mpesa_parser import process_single_file  # noqa: PLC0415
 
-    record_id = job["record_id"]
-    pdf_path  = job["pdf_path"]
-    file_name = job["file_name"]
-    pin       = job["pin"]
+    record_id  = job["record_id"]
+    pdf_path   = job["pdf_path"]
+    file_name  = job["file_name"]
+    pin        = job["pin"]
 
     base = os.path.splitext(file_name)[0]
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_csv = os.path.join(OUTPUT_DIR, f"{base}.csv")
 
-    print(
-        f"[worker] processing  job_id={job['job_id']}"
-        f"  record_id={record_id}  pdf={pdf_path}"
-    )
-
-    file_md5  = _compute_md5(pdf_path)
-    start_ts  = datetime.now()
+    file_md5 = _compute_md5(pdf_path)
+    start_ts = datetime.now()
 
     try:
-        result   = process_single_file(
+        result  = process_single_file(
             pdf_path=pdf_path,
             output_csv=output_csv,
             password=pin,
             record_id=record_id,
         )
-        end_ts   = datetime.now()
-        success  = result is not None
+        end_ts  = datetime.now()
+        success = result is not None
+        error   = "" if success else "process_single_file returned None"
         _write_log({
             "filename":        file_name,
             "md5":             file_md5,
@@ -214,12 +230,12 @@ def _process_job(job: dict) -> bool:
             "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "status":          "SUCCESS" if success else "FAILED",
-            "error":           "" if success else "process_single_file returned None",
+            "error":           error,
         })
-        return success
+        return success, error
 
     except Exception as exc:
-        end_ts = datetime.now()
+        end_ts    = datetime.now()
         error_msg = str(exc)[:500].replace("\n", " ")
         print(f"[worker] ERROR  job_id={job['job_id']}: {exc}", file=sys.stderr)
         _write_log({
@@ -233,7 +249,7 @@ def _process_job(job: dict) -> bool:
             "status":          "FAILED",
             "error":           error_msg,
         })
-        return False
+        return False, error_msg
 
 
 def _run_worker() -> None:
@@ -274,13 +290,32 @@ def _run_worker() -> None:
                 os.remove(job_file)
                 continue
 
-            success      = _process_job(job)
+            # ── processing ────────────────────────────────────────────────────
+            job = _update_job_file(
+                job_file,
+                status="processing",
+                processing_started_at=_utc_now(),
+            )
+            print(
+                f"[worker] status=processing  job_id={job['job_id']}"
+                f"  record_id={job['record_id']}  pdf={job['pdf_path']}"
+            )
+
+            success, error_msg = _process_job(job)
+
+            # ── final status ──────────────────────────────────────────────────
+            final_status = "success" if success else "failed"
+            job = _update_job_file(
+                job_file,
+                status=final_status,
+                completed_at=_utc_now(),
+                error=error_msg or None,
+            )
+            print(f"[worker] status={final_status}  job_id={job['job_id']}")
+
             archive_dir  = _DONE_DIR if success else _FAILED_DIR
             archive_path = os.path.join(archive_dir, os.path.basename(job_file))
             shutil.move(job_file, archive_path)
-
-            status = "done" if success else "failed"
-            print(f"[worker] job_id={job['job_id']} {status}")
 
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
