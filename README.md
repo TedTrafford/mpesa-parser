@@ -1,6 +1,6 @@
 # MPESA Statement Parser
 
-This tool parses M-PESA PDF statements and extracts transaction data into CSV files with complete customer information.
+This tool parses M-PESA PDF statements and extracts transaction data into CSV files and a MySQL database, with complete customer information and parse-provenance metadata.
 
 ## Quick Start
 
@@ -19,35 +19,36 @@ pip install -r requirements.txt
 
 # 4b. Parse a single PDF (queued, safe for concurrent callers)
 python parse_single.py <record_id> <file_name> <pdf_path> <pin>
+
+# 4c. Test DB connectivity (run on server to diagnose upload issues)
+python db_test.py
 ```
 
 ## Requirements
 
-- Python 3.6+
-- Required Python packages:
-  - PyPDF2
-  - pandas
-  - re (built-in)
+- Python 3.9+
+- Required Python packages (see `requirements.txt`):
+  - `PyPDF2==3.0.1`
+  - `pandas>=2.2.0`
+  - `numpy>=1.26.0`
+  - `SQLAlchemy>=2.0`
+  - `PyMySQL>=1.1`
+  - `python-dateutil>=2.8`
 
 ## Installation
 
 ### Option 1: Using Anaconda (Recommended)
 
 ```bash
-# Create conda environment
 conda create -n mpesa_parser python=3.9 -y
-
-# Activate environment
 conda activate mpesa_parser
-
-# Install dependencies
-pip install PyPDF2==3.0.1 "numpy<2.0" pandas==2.0.0
+pip install -r requirements.txt
 ```
 
 ### Option 2: Using pip
 
 ```bash
-pip install PyPDF2==3.0.1 pandas==2.0.0
+pip install -r requirements.txt
 ```
 
 ## Directory Structure
@@ -55,55 +56,61 @@ pip install PyPDF2==3.0.1 pandas==2.0.0
 ```
 .
 ├── Mpesa_pdf_statement/          # Input: Place PDF files here
-├── Mpesa_csv_Statement_Parsed/   # Output: Successful CSVs and PDFs
+├── Mpesa_csv_Statement_Parsed/   # Output: Successful CSVs
 ├── Mpesa_csv_Statement_Failed/   # Failed: PDFs that couldn't be parsed
+├── logs/                         # Runtime logs (auto-created)
+│   ├── processing_log.log        #   Per-job outcome (SUCCESS / SKIPPED / FAILED)
+│   ├── db_errors.log             #   Full DB error tracebacks
+│   └── parse_single_debug.log    #   Raw argument diagnostics per invocation
 ├── queue/                        # Runtime queue (git-ignored)
 │   ├── pending/                  #   Jobs waiting to be processed
 │   ├── done/                     #   Completed job descriptors
 │   ├── failed/                   #   Failed job descriptors
 │   └── worker.lock               #   Advisory lock (one worker at a time)
-├── parser/                       # Parser module
-│   └── mpesa_parser.py          # Core parser + process_single_file()
+├── parser/
+│   └── mpesa_parser.py           # Core parser + process_single_file()
 ├── db/
 │   ├── schema.sql                # MySQL table DDL
-│   ├── uploader.py               # MySQL upload helper
+│   ├── uploader.py               # MySQL upload helper (INSERT IGNORE + UploadResult)
 │   └── features_207.sql          # 207-feature credit-scoring SQL query
 ├── config.py                     # Paths, DB credentials, regex patterns
-├── parse_single.py               # Single-file queued parser (new)
-├── process_all_pdfs.py          # Batch processor
-├── run_parser.sh                # Quick batch-run script
-├── requirements.txt             # Python dependencies
-└── README.md                    # This file
+├── parse_single.py               # Single-file queued parser (PHP integration)
+├── process_all_pdfs.py           # Batch processor
+├── db_test.py                    # DB connectivity diagnostic script
+├── run_parser.sh                 # Quick batch-run script
+├── requirements.txt              # Python dependencies
+└── README.md                     # This file
 ```
 
 ## Configuration
 
-All paths, patterns and transaction type mappings are centralized in `config.py`. If you need to modify:
-- Input/output directories
-- Transaction regex pattern
-- Transaction type mappings
+All paths, DB credentials, regex patterns, and transaction type mappings are
+centralized in `config.py`. Override any value with environment variables:
 
-Edit the `config.py` file instead of modifying individual scripts.
+| Environment variable | Default | Description |
+|---|---|---|
+| `MPESA_DB_HOST` | `139.84.243.180` | MySQL host |
+| `MPESA_DB_PORT` | `3306` | MySQL port |
+| `MPESA_DB_NAME` | `Data_Science` | Database name |
+| `MPESA_DB_USER` | `staging` | MySQL user |
+| `MPESA_DB_PASSWORD` | *(hardcoded fallback)* | MySQL password |
 
 ## How to Use
 
-### Option 1: Batch-process all PDFs (with Anaconda)
+### Option 1: Batch-process all PDFs
 
 ```bash
 conda activate mpesa_parser
 ./run_parser.sh
-```
-
-Or directly:
-
-```bash
+# or directly:
 python process_all_pdfs.py
 ```
 
 ### Option 2: Parse a single file with queueing (`parse_single.py`)
 
-Use this when integrating with an external system (e.g. a web application)
-that submits one statement at a time and may call the script concurrently.
+Use this when integrating with an external system (e.g. a PHP/Laravel web
+application) that submits one statement at a time and may call the script
+concurrently.
 
 ```bash
 python parse_single.py <record_id> <file_name> <pdf_path> <pin>
@@ -111,28 +118,36 @@ python parse_single.py <record_id> <file_name> <pdf_path> <pin>
 
 | Argument | Description |
 |----------|-------------|
-| `record_id` | Caller-supplied unique identifier (e.g. a database application ID). Stored in the `metadata` JSON column of every transaction row. |
+| `record_id` | Caller-supplied unique identifier (e.g. a Laravel model UUID). Stored in the `record_id` DB column of every transaction row. |
 | `file_name` | Original PDF filename (e.g. `310549.pdf`). The output CSV uses the same stem. |
-| `pdf_path` | Path to the PDF file on disk. |
+| `pdf_path` | Absolute path to the PDF file on disk. |
 | `pin` | PDF password used to decrypt the M-PESA statement. |
 
 **Examples:**
 
 ```bash
 # Minimal call — record_id ties this parse back to your application record
-python parse_single.py 12345 310549.pdf /tmp/statements/310549.pdf 310549
+python parse_single.py 12345 310549.pdf /var/uploads/310549.pdf 310549
 
-# Absolute path
-python parse_single.py app-req-9f3a statement.pdf /var/uploads/statement.pdf 123456
+# With a UUID record_id (typical Laravel usage)
+python parse_single.py 019cf6da-b7d9-73a6-bd7a-f0f8d52a66ba statement.pdf \
+    /var/www/app/storage/app/private/mpesa-statements/statement.pdf 123456
 ```
+
+**Path handling:**
+
+`parse_single.py` accepts absolute paths only. If the caller strips the
+leading `/` (producing a relative path), the script restores it automatically
+before validation — preventing the doubled-path bug that results from
+`os.path.abspath()` prepending the process CWD.
 
 **Concurrency behaviour:**
 
-When multiple processes call `parse_single.py` at the same time each one
+Multiple processes may call `parse_single.py` simultaneously. Each call
 atomically writes a job file to `queue/pending/` and then attempts to acquire
 an exclusive advisory lock (`queue/worker.lock`).
 
-- The **first caller** that wins the lock becomes the worker and processes all
+- The **first caller** that wins the lock becomes the worker and drains all
   pending jobs in arrival order before releasing the lock.
 - **Subsequent callers** that lose the lock exit immediately after enqueuing —
   their job is picked up by the running worker in the same drain loop.
@@ -151,32 +166,101 @@ python parser/mpesa_parser.py Mpesa_pdf_statement/288720.pdf
 python parser/mpesa_parser.py Mpesa_pdf_statement/288720.pdf output.csv 288720
 ```
 
-## Features
+## Database Upload
 
-- Extracts transaction details including:
-  - **Customer Name** (e.g., Monica Atieno Ondoo)
-  - **Mobile Number** (e.g., 0112850906)
-  - **Email Address** (e.g., info@aleza.co.ke)
-  - **Statement Period** (e.g., 14 Aug 2024 - 14 Feb 2025)
-  - **Request Date** (e.g., 14 Feb 2025)
-  - Date and time of transaction
-  - Receipt number
-  - Transaction type
-  - Transaction details
-  - Amount
-  - Balance
-- Handles line breaks in transaction data
-- Automatically extracts 6-digit password from PDF filename
-- Supports multiple filename formats:
-  - Pure numbers: `123456.pdf` → password is `123456`
-  - With text prefix: `Maniga123456.pdf` → password is `123456`
-  - Old format: `123456_something.pdf` → password is `123456`
-- Supports batch processing of multiple PDF files
-- Automatically organizes files after processing:
-  - Successful: PDFs and CSVs moved to `Mpesa_csv_Statement_Parsed/`
-  - Failed: PDFs moved to `Mpesa_csv_Statement_Failed/`
-- Centralized configuration for easy customization
-- Detailed processing summary showing successes and failures
+Every successful parse uploads the extracted transactions to MySQL table
+`tbl_raw_mpesa_statements`.
+
+### Duplicate handling (INSERT IGNORE)
+
+Rows are inserted with `INSERT IGNORE`. If a `receipt_no` already exists in
+the table, the new row is **silently skipped** — no duplicate is created. This
+behaviour is intentional:
+
+- Re-uploading the same PDF by the same user produces no duplicates.
+- A different user uploading a PDF that shares a receipt number is flagged as a
+  potential duplicate or fraudulent submission — visible in the processing log
+  as `status: SKIPPED`.
+
+### DB connectivity diagnostic
+
+Before deploying or when troubleshooting, run the diagnostic script on the
+server to verify each layer in isolation:
+
+```bash
+python db_test.py
+```
+
+The script checks: config loading → PyMySQL import → raw TCP connection →
+MySQL authentication → SQLAlchemy engine → table creation → test row insert.
+Each step prints `PASS` or `FAIL` with a clear explanation.
+
+## Logs
+
+All runtime logs are written to the `logs/` directory next to `parse_single.py`
+(auto-created on first run).
+
+### `logs/processing_log.log`
+
+One block per job, retained for 3 years. Fields:
+
+| Field | Description |
+|---|---|
+| `filename` | PDF filename |
+| `md5` | MD5 of the raw PDF bytes |
+| `manifest_hash` | MD5 of (filename bytes + file bytes) — changes if either the name or content changes |
+| `source` | Always `parse_single.py` |
+| `source_path` | Absolute path to the input PDF |
+| `destination` | Absolute path to the output CSV |
+| `record_id` | Caller-supplied identifier |
+| `rows_inserted` | Number of new rows written to MySQL |
+| `rows_skipped` | Number of rows silently ignored (receipt_no already exists) |
+| `start` / `end` / `duration` | Job timing |
+| `status` | `SUCCESS`, `SKIPPED`, or `FAILED` |
+| `error` | Empty on success; skip reason or exception message otherwise |
+
+**Status values:**
+
+| Status | Meaning |
+|---|---|
+| `SUCCESS` | PDF parsed and all (or some) rows inserted into MySQL |
+| `SKIPPED` | PDF parsed successfully but all rows already exist — possible duplicate submission |
+| `FAILED` | Parsing or DB error — see `error` field and `db_errors.log` |
+
+**Example — new upload:**
+```
+filename      : abc123.pdf
+md5           : 5ad9815575d547baeab12e70031ac316
+manifest_hash : e3b0c44298fc1c149afb4c8996fb924
+...
+rows_inserted : 47
+rows_skipped  : 0
+status        : SUCCESS
+error         :
+```
+
+**Example — duplicate submission:**
+```
+filename      : abc123.pdf
+md5           : 5ad9815575d547baeab12e70031ac316
+manifest_hash : e3b0c44298fc1c149afb4c8996fb924
+...
+rows_inserted : 0
+rows_skipped  : 47
+status        : SKIPPED
+error         : 47 row(s) already exist in the database (receipt_no conflict — possible duplicate submission)
+```
+
+### `logs/db_errors.log`
+
+Full Python traceback for every DB error. Check this first when `status: FAILED`
+and the error message is truncated in `processing_log.log`.
+
+### `logs/parse_single_debug.log`
+
+One line per script invocation showing the raw `pdf_path` argument received
+from the caller, the resolved path after the leading-slash guard, the process
+CWD, and whether the file exists. Useful for diagnosing path issues.
 
 ## CSV / Database Output Format
 
@@ -184,7 +268,7 @@ Each parsed statement produces **14 columns** (CSV and database table):
 
 | Column | DB column | Description | Example |
 |--------|-----------|-------------|---------|
-| Record ID | `record_id` | Caller-supplied unique identifier (empty for batch runs) | `12345` |
+| Record ID | `record_id` | Caller-supplied unique identifier | `019cf6da-b7d9-73a6-bd7a-f0f8d52a66ba` |
 | Customer Name | `customer_name` | Account holder name | Monica Atieno Ondoo |
 | Mobile Number | `mobile_number` | M-PESA number | 0112850906 |
 | Email Address | `email_address` | Email on account | info@aleza.co.ke |
@@ -195,14 +279,13 @@ Each parsed statement produces **14 columns** (CSV and database table):
 | Receipt No | `receipt_no` | M-PESA receipt (unique) | TJEKA7E3VO |
 | Transaction Type | `transaction_type` | Category | SEND MONEY |
 | Details | `details` | Full description | Customer Transfer to... |
-| Amount | `amount` | Signed transaction amount | -1500.0 |
+| Amount | `amount` | Signed transaction amount | -1500.00 |
 | Balance | `balance` | Balance after transaction | 5432.10 |
 | metadata | `metadata` | JSON parse-provenance object | see below |
 
 ### `metadata` column
 
 Every row carries a `metadata` JSON object with parse-level provenance.
-The caller-supplied identifier is stored separately in `record_id`, not here.
 
 ```json
 {
@@ -215,37 +298,77 @@ The caller-supplied identifier is stored separately in `record_id`, not here.
 
 | Key | Description |
 |-----|-------------|
-| `manifest_hash` | MD5 of filename + file contents — changes if the file is replaced |
-| `pin` | PDF stem (the M-PESA PIN used as password) |
-| `record_uuid` | UUID4 unique to this transaction row |
+| `manifest_hash` | MD5 of (filename bytes + file bytes) — changes if the file is replaced |
+| `pin` | PDF stem used as the decryption password |
+| `record_uuid` | UUID4 unique to this individual transaction row |
 | `output_file_path` | Absolute path to the output CSV |
 
 ## Troubleshooting
 
-If you encounter errors:
+### 1. Module not found
+```bash
+conda activate mpesa_parser
+pip install -r requirements.txt
+```
 
-1. **Module not found**: Make sure conda environment is activated
-   ```bash
-   conda activate mpesa_parser
-   pip install PyPDF2==3.0.1 "numpy<2.0" pandas==2.0.0
-   ```
+### 2. numpy compatibility errors
+```bash
+pip uninstall -y numpy pandas
+pip install "numpy<2.0" pandas==2.0.0
+```
 
-2. **Numpy compatibility errors**: Reinstall with correct version
-   ```bash
-   pip uninstall -y numpy pandas
-   pip install "numpy<2.0" pandas==2.0.0
-   ```
+### 3. Password / decryption errors
+Verify the filename contains a 6-digit number:
+- Pure numbers: `288720.pdf` → password `288720`
+- With text prefix: `Maniga953060.pdf` → password `953060`
+- Old format: `123456_statement.pdf` → password `123456`
 
-3. **Password errors**: Verify filename contains 6-digit number
-   - Pure numbers: `288720.pdf` → password is `288720`
-   - With text: `Maniga953060.pdf` → password is `953060`
-   - Old format: `123456_statement.pdf` → password is `123456`
+### 4. Data not appearing in MySQL
 
-4. **Processing stops**: Re-run the script - already processed files have been moved
-   ```bash
-   ./run_parser.sh
-   ```
+Run the DB diagnostic on the server:
+```bash
+python db_test.py
+```
+
+Then check the logs:
+```bash
+# Job outcome and skip/insert counts
+cat logs/processing_log.log
+
+# Full DB error traceback (if any)
+cat logs/db_errors.log
+
+# Raw path received from caller
+cat logs/parse_single_debug.log
+```
+
+If all jobs show `status: SKIPPED`, the receipt numbers already exist in the
+database from a previous run. This is expected behaviour (INSERT IGNORE). If
+you need to re-import from scratch, truncate the table and re-run:
+
+```sql
+TRUNCATE TABLE tbl_raw_mpesa_statements;
+```
+
+### 5. Doubled file path (`/var/www/.../var/www/...`)
+
+This was a known production bug caused by PHP prepending the storage base path
+to a `file_path` value that already contained the full absolute path.
+
+**PHP-side fix:** ensure `$filePath` is constructed from the relative portion
+of the stored path only, not from a path that already contains the base.
+
+**Python-side guard:** `parse_single.py` automatically restores a missing
+leading `/` if the received path is not absolute, preventing `os.path.abspath()`
+from prepending the process CWD and doubling the path.
+
+### 6. Processing stops during batch run
+Re-run the script — already processed files have been moved:
+```bash
+./run_parser.sh
+```
 
 ## Customization
 
-To add new transaction types or modify existing ones, edit the `TRANSACTION_TYPES` dictionary in `config.py`. 
+To add new transaction types or modify existing ones, edit the
+`TRANSACTION_TYPES` dictionary in `config.py`.

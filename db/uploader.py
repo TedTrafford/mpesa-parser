@@ -6,16 +6,21 @@ Handles creating the MySQL table (if it does not exist) and uploading a
 parsed M-PESA DataFrame to `tbl_raw_mpesa_statements`.
 
 Duplicate rows are silently skipped thanks to INSERT IGNORE — re-running the
-parser against the same PDF will not create duplicate records.
+parser against the same PDF will not create duplicate records, and skipped
+rows are preserved for duplicate and fraud identification.
 """
 
+import json
 import os
 import sys
 import traceback
+from collections import namedtuple
 from datetime import datetime, timezone
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+UploadResult = namedtuple("UploadResult", ["inserted", "skipped", "manifest_hash"])
 
 # Allow imports from the project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -147,7 +152,8 @@ def ensure_table_exists():
 
 
 # ---------------------------------------------------------------------------
-# Custom pandas to_sql method — uses INSERT IGNORE for idempotent uploads
+# Custom pandas to_sql method — INSERT IGNORE so duplicate receipt_no rows
+# are silently skipped (aids duplicate and fraud identification).
 # ---------------------------------------------------------------------------
 def _insert_ignore(table, conn, keys, data_iter):
     rows = [dict(zip(keys, row)) for row in data_iter]
@@ -163,15 +169,16 @@ def _row_count(engine) -> int:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-def upload_to_mysql(df: pd.DataFrame) -> int:
+def upload_to_mysql(df: pd.DataFrame) -> UploadResult:
     """
     Upload *df* to tbl_raw_mpesa_statements.
 
     - Renames DataFrame columns to their SQL equivalents.
     - Creates the table if it does not exist.
-    - Uses INSERT IGNORE so duplicate receipt numbers are silently skipped.
+    - Uses INSERT IGNORE so duplicate receipt numbers are silently skipped,
+      preserving them for duplicate and fraud identification.
 
-    Returns the number of new rows inserted.
+    Returns an UploadResult(inserted, skipped, manifest_hash).
     Raises on any DB error after writing the full traceback to logs/db_errors.log.
     """
     try:
@@ -188,6 +195,16 @@ def upload_to_mysql(df: pd.DataFrame) -> int:
             df_upload["transaction_date"] = pd.to_datetime(
                 df_upload["transaction_date"]
             ).dt.date
+
+        # Extract manifest_hash from the metadata column for logging
+        manifest_hash = ""
+        if "metadata" in df_upload.columns and len(df_upload) > 0:
+            try:
+                manifest_hash = json.loads(df_upload["metadata"].iloc[0]).get(
+                    "manifest_hash", ""
+                )
+            except (ValueError, KeyError, TypeError):
+                pass
 
         before = _row_count(engine)
 
@@ -207,7 +224,7 @@ def upload_to_mysql(df: pd.DataFrame) -> int:
             f"  DB: {inserted} new row(s) inserted into `{DB_TABLE}`"
             + (f", {skipped} duplicate(s) skipped" if skipped else "")
         )
-        return inserted
+        return UploadResult(inserted=inserted, skipped=skipped, manifest_hash=manifest_hash)
 
     except Exception as exc:
         _log_db_error(f"upload_to_mysql failed: {exc}", exc)

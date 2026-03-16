@@ -271,7 +271,7 @@ def process_pdf_file(pdf_path):
     df.to_csv(output_csv, index=False)
     print(f"Data saved to {output_csv}")
 
-    upload_to_mysql(df)
+    df.attrs["upload_result"] = upload_to_mysql(df)
 
     # Display DataFrame summary
     print(f"Total transactions in CSV: {len(df)}")
@@ -319,7 +319,7 @@ def process_single_file(pdf_path, output_csv=None, password=None, record_id=None
         df.to_csv(default_output, index=False)
         print(f"Data saved to {default_output}")
 
-    upload_to_mysql(df)
+    df.attrs["upload_result"] = upload_to_mysql(df)
 
     print(f"Total transactions in CSV: {len(df)}")
     print("\nFirst few transactions:")

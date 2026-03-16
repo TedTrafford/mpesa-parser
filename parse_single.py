@@ -79,10 +79,13 @@ def _write_log(entry: dict) -> None:
     """Append one log block and prune entries older than _RETENTION_YEARS.
 
     Extended fields compared to process_all_pdfs.py:
-        source       — always 'parse_single.py'
-        source_path  — absolute path to the input PDF
-        destination  — absolute path to the output CSV
-        record_id    — caller-supplied unique identifier
+        source        — always 'parse_single.py'
+        source_path   — absolute path to the input PDF
+        destination   — absolute path to the output CSV
+        record_id     — caller-supplied unique identifier
+        manifest_hash — MD5 of (filename bytes + file content bytes)
+        rows_inserted — number of new rows written to the DB
+        rows_skipped  — number of rows silently ignored (receipt_no already exists)
     """
     os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -93,18 +96,25 @@ def _write_log(entry: dict) -> None:
     except ValueError:
         duration = "N/A"
 
+    rows_inserted = entry.get("rows_inserted", "")
+    rows_skipped  = entry.get("rows_skipped",  "")
+    manifest_hash = entry.get("manifest_hash", "")
+
     new_block = (
-        f"filename    : {entry['filename']}\n"
-        f"md5         : {entry['md5']}\n"
-        f"source      : parse_single.py\n"
-        f"source_path : {entry['source_path']}\n"
-        f"destination : {entry['destination']}\n"
-        f"record_id   : {entry['record_id']}\n"
-        f"start       : {entry['start_timestamp']}\n"
-        f"end         : {entry['end_timestamp']}\n"
-        f"duration    : {duration}\n"
-        f"status      : {entry['status']}\n"
-        f"error       : {entry['error']}"
+        f"filename      : {entry['filename']}\n"
+        f"md5           : {entry['md5']}\n"
+        f"manifest_hash : {manifest_hash}\n"
+        f"source        : parse_single.py\n"
+        f"source_path   : {entry['source_path']}\n"
+        f"destination   : {entry['destination']}\n"
+        f"record_id     : {entry['record_id']}\n"
+        f"rows_inserted : {rows_inserted}\n"
+        f"rows_skipped  : {rows_skipped}\n"
+        f"start         : {entry['start_timestamp']}\n"
+        f"end           : {entry['end_timestamp']}\n"
+        f"duration      : {duration}\n"
+        f"status        : {entry['status']}\n"
+        f"error         : {entry['error']}"
     )
 
     cutoff = datetime.now() - relativedelta(years=_RETENTION_YEARS)
@@ -218,18 +228,38 @@ def _process_job(job: dict) -> tuple:
             password=pin,
             record_id=record_id,
         )
-        end_ts  = datetime.now()
-        success = result is not None
-        error   = "" if success else "process_single_file returned None"
+        end_ts        = datetime.now()
+        success       = result is not None
+        upload        = result.attrs.get("upload_result") if success else None
+        rows_inserted = upload.inserted      if upload else ""
+        rows_skipped  = upload.skipped       if upload else ""
+        manifest_hash = upload.manifest_hash if upload else ""
+
+        if not success:
+            status = "FAILED"
+            error  = "process_single_file returned None"
+        elif upload and upload.inserted == 0 and upload.skipped > 0:
+            status = "SKIPPED"
+            error  = (
+                f"{upload.skipped} row(s) already exist in the database "
+                f"(receipt_no conflict — possible duplicate submission)"
+            )
+        else:
+            status = "SUCCESS"
+            error  = ""
+
         _write_log({
             "filename":        file_name,
             "md5":             file_md5,
+            "manifest_hash":   manifest_hash,
             "source_path":     os.path.abspath(pdf_path),
             "destination":     os.path.abspath(output_csv),
             "record_id":       record_id,
+            "rows_inserted":   rows_inserted,
+            "rows_skipped":    rows_skipped,
             "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "status":          "SUCCESS" if success else "FAILED",
+            "status":          status,
             "error":           error,
         })
         return success, error
@@ -241,9 +271,12 @@ def _process_job(job: dict) -> tuple:
         _write_log({
             "filename":        file_name,
             "md5":             file_md5,
+            "manifest_hash":   "",
             "source_path":     os.path.abspath(pdf_path),
             "destination":     os.path.abspath(output_csv),
             "record_id":       record_id,
+            "rows_inserted":   "",
+            "rows_skipped":    "",
             "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "status":          "FAILED",
