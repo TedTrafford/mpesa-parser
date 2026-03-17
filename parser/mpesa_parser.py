@@ -213,17 +213,19 @@ def parse_mpesa_statement(text, pdf_path):
     print(f"Successfully processed {len(transactions)} transactions")
     return transactions
 
-def _attach_metadata(df, pdf_path, output_csv):
+def _attach_metadata(df, pdf_path, output_csv, pin=None):
     """
     Append a 'metadata' column to *df* containing a JSON object per row with:
 
     - manifest_hash   : MD5 of (filename bytes + file content bytes)
-    - pin             : source filename without the .pdf extension
+    - pin             : PDF decryption password; falls back to the filename stem
+                        when not explicitly supplied (batch-mode path)
     - record_uuid     : a unique UUID4 for this individual transaction row
     - output_file_path: absolute path to the CSV file where this row is stored
     """
     manifest_hash = compute_manifest_hash(pdf_path)
-    pin = os.path.splitext(os.path.basename(pdf_path))[0]
+    if pin is None:
+        pin = os.path.splitext(os.path.basename(pdf_path))[0]
     abs_output = os.path.abspath(output_csv)
 
     df["metadata"] = [
@@ -266,7 +268,7 @@ def process_pdf_file(pdf_path):
     base_filename = os.path.basename(pdf_path)
     output_csv = os.path.join(OUTPUT_DIR, base_filename.replace('.pdf', '.csv'))
 
-    df = _attach_metadata(df, pdf_path, output_csv)
+    df = _attach_metadata(df, pdf_path, output_csv)  # batch mode: derive pin from filename
 
     df.to_csv(output_csv, index=False)
     print(f"Data saved to {output_csv}")
@@ -309,13 +311,13 @@ def process_single_file(pdf_path, output_csv=None, password=None, record_id=None
 
     # Save to CSV
     if output_csv:
-        df = _attach_metadata(df, pdf_path, output_csv)
+        df = _attach_metadata(df, pdf_path, output_csv, pin=password)
         df.to_csv(output_csv, index=False)
         print(f"Data saved to {output_csv}")
     else:
         base_filename = os.path.basename(pdf_path)
         default_output = os.path.join(OUTPUT_DIR, base_filename.replace('.pdf', '.csv'))
-        df = _attach_metadata(df, pdf_path, default_output)
+        df = _attach_metadata(df, pdf_path, default_output, pin=password)
         df.to_csv(default_output, index=False)
         print(f"Data saved to {default_output}")
 
