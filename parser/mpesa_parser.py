@@ -213,7 +213,7 @@ def parse_mpesa_statement(text, pdf_path):
     print(f"Successfully processed {len(transactions)} transactions")
     return transactions
 
-def _attach_metadata(df, pdf_path, output_csv, pin=None):
+def _attach_metadata(df, pdf_path, output_csv, pin=None, start_time=None, end_time=None):
     """
     Append a 'metadata' column to *df* containing a JSON object per row with:
 
@@ -222,19 +222,27 @@ def _attach_metadata(df, pdf_path, output_csv, pin=None):
                         when not explicitly supplied (batch-mode path)
     - record_uuid     : a unique UUID4 for this individual transaction row
     - output_file_path: absolute path to the CSV file where this row is stored
+    - start_time      : ISO-8601 timestamp when processing began
+    - end_time        : ISO-8601 timestamp when processing completed
     """
     manifest_hash = compute_manifest_hash(pdf_path)
     if pin is None:
         pin = os.path.splitext(os.path.basename(pdf_path))[0]
     abs_output = os.path.abspath(output_csv)
 
+    _fmt = "%Y-%m-%dT%H:%M:%S"
+    start_str = start_time.strftime(_fmt) if isinstance(start_time, datetime) else (start_time or "")
+    end_str   = end_time.strftime(_fmt)   if isinstance(end_time,   datetime) else (end_time   or "")
+
     df["metadata"] = [
         json.dumps(
             {
-                "manifest_hash": manifest_hash,
-                "pin": pin,
-                "record_uuid": str(uuid.uuid4()),
+                "manifest_hash":    manifest_hash,
+                "pin":              pin,
+                "record_uuid":      str(uuid.uuid4()),
                 "output_file_path": abs_output,
+                "start_time":       start_str,
+                "end_time":         end_str,
             },
             separators=(",", ":"),
         )
@@ -246,7 +254,9 @@ def _attach_metadata(df, pdf_path, output_csv, pin=None):
 def process_pdf_file(pdf_path):
     """Process a single PDF file and save the output to CSV."""
     print(f"\nProcessing PDF file: {pdf_path}")
-    
+
+    start_time = datetime.now()
+
     # Extract text from PDF
     text = extract_text_from_pdf(pdf_path)
     
@@ -268,7 +278,8 @@ def process_pdf_file(pdf_path):
     base_filename = os.path.basename(pdf_path)
     output_csv = os.path.join(OUTPUT_DIR, base_filename.replace('.pdf', '.csv'))
 
-    df = _attach_metadata(df, pdf_path, output_csv)  # batch mode: derive pin from filename
+    end_time = datetime.now()
+    df = _attach_metadata(df, pdf_path, output_csv, start_time=start_time, end_time=end_time)
 
     df.to_csv(output_csv, index=False)
     print(f"Data saved to {output_csv}")
@@ -295,6 +306,8 @@ def process_single_file(pdf_path, output_csv=None, password=None, record_id=None
     global PASSWORD
     PASSWORD = password
 
+    start_time = datetime.now()
+
     # Extract text from PDF
     text = extract_text_from_pdf(pdf_path)
 
@@ -309,15 +322,17 @@ def process_single_file(pdf_path, output_csv=None, password=None, record_id=None
     df = pd.DataFrame(transactions)
     df["Record ID"] = str(record_id) if record_id is not None else ""
 
+    end_time = datetime.now()
+
     # Save to CSV
     if output_csv:
-        df = _attach_metadata(df, pdf_path, output_csv, pin=password)
+        df = _attach_metadata(df, pdf_path, output_csv, pin=password, start_time=start_time, end_time=end_time)
         df.to_csv(output_csv, index=False)
         print(f"Data saved to {output_csv}")
     else:
         base_filename = os.path.basename(pdf_path)
         default_output = os.path.join(OUTPUT_DIR, base_filename.replace('.pdf', '.csv'))
-        df = _attach_metadata(df, pdf_path, default_output, pin=password)
+        df = _attach_metadata(df, pdf_path, default_output, pin=password, start_time=start_time, end_time=end_time)
         df.to_csv(default_output, index=False)
         print(f"Data saved to {default_output}")
 
