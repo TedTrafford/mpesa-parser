@@ -9,6 +9,7 @@ import hashlib
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from config import INPUT_DIR, OUTPUT_DIR, FAILED_DIR, LOG_DIR
+from db.uploader import insert_processing_log
 
 LOG_FILE = os.path.join(LOG_DIR, "processing_log.log")
 _SEPARATOR = "-" * 60
@@ -166,7 +167,7 @@ for i, pdf_file in enumerate(pdf_files, 1):
 
             print(f"✓ Successfully created CSV file: {output_csv}")
             successful_files.append(base_filename)
-            _write_log({
+            log_entry = {
                 "filename":        base_filename,
                 "md5":             file_md5,
                 "manifest_hash":   man_hash,
@@ -179,14 +180,16 @@ for i, pdf_file in enumerate(pdf_files, 1):
                 "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
                 "status":          status,
                 "error":           error,
-            })
+            }
+            _write_log(log_entry)
+            insert_processing_log(log_entry)
             parsed_pdf_path = os.path.join(OUTPUT_DIR, base_filename)
             shutil.move(pdf_file, parsed_pdf_path)
             print(f"  Moved PDF to: {parsed_pdf_path}")
         else:
             end_ts = datetime.now()
             print(f"✗ ERROR: Failed to create CSV file for {pdf_file}")
-            _write_log({
+            log_entry = {
                 "filename":        base_filename,
                 "md5":             file_md5,
                 "manifest_hash":   "",
@@ -199,7 +202,9 @@ for i, pdf_file in enumerate(pdf_files, 1):
                 "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
                 "status":          "FAILED",
                 "error":           "No transactions parsed or CSV not created",
-            })
+            }
+            _write_log(log_entry)
+            insert_processing_log(log_entry)
             failed_path = os.path.join(FAILED_DIR, base_filename)
             shutil.move(pdf_file, failed_path)
             print(f"  Moved failed PDF to: {failed_path}")
@@ -208,7 +213,7 @@ for i, pdf_file in enumerate(pdf_files, 1):
     except Exception as e:
         end_ts = datetime.now()
         print(f"✗ Error processing {pdf_file}: {str(e)}")
-        _write_log({
+        log_entry = {
             "filename":        base_filename,
             "md5":             file_md5,
             "manifest_hash":   "",
@@ -221,7 +226,9 @@ for i, pdf_file in enumerate(pdf_files, 1):
             "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "status":          "FAILED",
             "error":           str(e)[:500].replace("\n", " "),
-        })
+        }
+        _write_log(log_entry)
+        insert_processing_log(log_entry)
         failed_path = os.path.join(FAILED_DIR, base_filename)
         shutil.move(pdf_file, failed_path)
         print(f"  Moved failed PDF to: {failed_path}")

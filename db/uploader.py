@@ -24,7 +24,7 @@ UploadResult = namedtuple("UploadResult", ["inserted", "skipped", "manifest_hash
 
 # Allow imports from the project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_TABLE, LOG_DIR
+from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_TABLE, DB_LOGS_TABLE, LOG_DIR
 
 _DB_ERROR_LOG = os.path.join(LOG_DIR, "db_errors.log")
 
@@ -269,3 +269,107 @@ def upload_to_mysql(df: pd.DataFrame) -> UploadResult:
     except Exception as exc:
         _log_db_error(f"upload_to_mysql failed: {exc}", exc)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Processing-log table
+# ---------------------------------------------------------------------------
+_CREATE_LOGS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS `{table}` (
+    `id`               BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
+    `filename`         VARCHAR(255)     NOT NULL DEFAULT '',
+    `md5`              VARCHAR(32)      NOT NULL DEFAULT '',
+    `manifest_hash`    VARCHAR(32)      NOT NULL DEFAULT '',
+    `source`           VARCHAR(100)     NOT NULL DEFAULT '',
+    `source_path`      TEXT             NOT NULL,
+    `destination`      TEXT             NOT NULL,
+    `record_id`        VARCHAR(255)     NOT NULL DEFAULT '',
+    `rows_inserted`    INT              NOT NULL DEFAULT 0,
+    `rows_skipped`     INT              NOT NULL DEFAULT 0,
+    `start_time`       DATETIME         NOT NULL,
+    `end_time`         DATETIME         NOT NULL,
+    `duration_seconds` DECIMAL(10, 2)   NOT NULL DEFAULT 0.00,
+    `status`           VARCHAR(20)      NOT NULL DEFAULT '',
+    `error`            TEXT             NOT NULL,
+    PRIMARY KEY (`id`),
+    INDEX `idx_log_record_id`  (`record_id`),
+    INDEX `idx_log_status`     (`status`),
+    INDEX `idx_log_filename`   (`filename`),
+    INDEX `idx_log_start_time` (`start_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='File processing audit log for M-PESA PDF parsing jobs'
+""".format(table=DB_LOGS_TABLE)
+
+
+def _ensure_logs_table_exists(conn) -> None:
+    conn.execute(text(_CREATE_LOGS_TABLE_SQL))
+
+
+def insert_processing_log(entry: dict) -> None:
+    """Insert one row into tbl_file_processing_logs.
+
+    *entry* uses the same keys produced by the ``_write_log`` helpers in
+    ``parse_single.py`` and ``process_all_pdfs.py``:
+
+        filename, md5, manifest_hash, source, source_path, destination,
+        record_id, rows_inserted, rows_skipped,
+        start_timestamp, end_timestamp,   ← "%Y-%m-%d %H:%M:%S" strings
+        status, error
+    """
+    _fmt = "%Y-%m-%d %H:%M:%S"
+
+    def _to_dt(val):
+        if isinstance(val, datetime):
+            return val
+        try:
+            return datetime.strptime(str(val).strip(), _fmt)
+        except (ValueError, TypeError):
+            return datetime.now(timezone.utc).replace(tzinfo=None)
+
+    start_dt = _to_dt(entry.get("start_timestamp", ""))
+    end_dt   = _to_dt(entry.get("end_timestamp",   ""))
+    duration = (end_dt - start_dt).total_seconds()
+
+    def _int(val):
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return 0
+
+    row = {
+        "filename":         entry.get("filename",       ""),
+        "md5":              entry.get("md5",            ""),
+        "manifest_hash":    entry.get("manifest_hash",  ""),
+        "source":           entry.get("source",         ""),
+        "source_path":      entry.get("source_path",    ""),
+        "destination":      entry.get("destination",    ""),
+        "record_id":        entry.get("record_id",      ""),
+        "rows_inserted":    _int(entry.get("rows_inserted", 0)),
+        "rows_skipped":     _int(entry.get("rows_skipped",  0)),
+        "start_time":       start_dt,
+        "end_time":         end_dt,
+        "duration_seconds": round(duration, 2),
+        "status":           entry.get("status", ""),
+        "error":            entry.get("error",  "") or "",
+    }
+
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            _ensure_logs_table_exists(conn)
+            conn.execute(
+                text(f"""
+                    INSERT INTO `{DB_LOGS_TABLE}`
+                        (filename, md5, manifest_hash, source, source_path,
+                         destination, record_id, rows_inserted, rows_skipped,
+                         start_time, end_time, duration_seconds, status, error)
+                    VALUES
+                        (:filename, :md5, :manifest_hash, :source, :source_path,
+                         :destination, :record_id, :rows_inserted, :rows_skipped,
+                         :start_time, :end_time, :duration_seconds, :status, :error)
+                """),
+                row,
+            )
+        print(f"  DB: processing log written to `{DB_LOGS_TABLE}`")
+    except Exception as exc:
+        _log_db_error(f"insert_processing_log failed: {exc}", exc)

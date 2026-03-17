@@ -12,7 +12,8 @@ DB_PORT = int(os.environ.get("MPESA_DB_PORT", 3306))
 DB_NAME = os.environ.get("MPESA_DB_NAME", "Data_Science")
 DB_USER = os.environ.get("MPESA_DB_USER", "staging")
 DB_PASSWORD = os.environ.get("MPESA_DB_PASSWORD", "gQTnYQ8Xwh1nl0di1rbz")
-DB_TABLE = "tbl_raw_mpesa_statements"
+DB_TABLE      = "tbl_raw_mpesa_statements"
+DB_LOGS_TABLE = "tbl_file_processing_logs"
 
 # Directory paths
 INPUT_DIR = os.path.join(BASE_DIR, "Mpesa_pdf_statement")

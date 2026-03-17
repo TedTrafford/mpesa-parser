@@ -53,6 +53,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 from config import FAILED_DIR, LOG_DIR, OUTPUT_DIR  # noqa: E402
+from db.uploader import insert_processing_log       # noqa: E402
 
 # ── queue / lock paths ────────────────────────────────────────────────────────
 _QUEUE_ROOT   = os.path.join(ROOT, "queue")
@@ -248,10 +249,11 @@ def _process_job(job: dict) -> tuple:
             status = "SUCCESS"
             error  = ""
 
-        _write_log({
+        log_entry = {
             "filename":        file_name,
             "md5":             file_md5,
             "manifest_hash":   manifest_hash,
+            "source":          "parse_single.py",
             "source_path":     os.path.abspath(pdf_path),
             "destination":     os.path.abspath(output_csv),
             "record_id":       record_id,
@@ -261,17 +263,20 @@ def _process_job(job: dict) -> tuple:
             "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "status":          status,
             "error":           error,
-        })
+        }
+        _write_log(log_entry)
+        insert_processing_log(log_entry)
         return success, error
 
     except Exception as exc:
         end_ts    = datetime.now()
         error_msg = str(exc)[:500].replace("\n", " ")
         print(f"[worker] ERROR  job_id={job['job_id']}: {exc}", file=sys.stderr)
-        _write_log({
+        log_entry = {
             "filename":        file_name,
             "md5":             file_md5,
             "manifest_hash":   "",
+            "source":          "parse_single.py",
             "source_path":     os.path.abspath(pdf_path),
             "destination":     os.path.abspath(output_csv),
             "record_id":       record_id,
@@ -281,7 +286,9 @@ def _process_job(job: dict) -> tuple:
             "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "status":          "FAILED",
             "error":           error_msg,
-        })
+        }
+        _write_log(log_entry)
+        insert_processing_log(log_entry)
         return False, error_msg
 
 
