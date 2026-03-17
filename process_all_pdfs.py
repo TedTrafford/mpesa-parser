@@ -3,14 +3,12 @@
 import os
 import sys
 import glob
-import subprocess
-import time
 import shutil
 import re
 import hashlib
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from config import INPUT_DIR, OUTPUT_DIR, FAILED_DIR, PARSER_SCRIPT, LOG_DIR
+from config import INPUT_DIR, OUTPUT_DIR, FAILED_DIR, LOG_DIR
 
 LOG_FILE = os.path.join(LOG_DIR, "processing_log.log")
 _SEPARATOR = "-" * 60
@@ -37,17 +35,20 @@ def _write_log(entry):
         duration = "N/A"
 
     new_block = (
-        f"filename    : {entry['filename']}\n"
-        f"md5         : {entry['md5']}\n"
-        f"source      : {entry.get('source', 'process_all_pdfs.py')}\n"
-        f"source_path : {entry.get('source_path', '')}\n"
-        f"destination : {entry.get('destination', '')}\n"
-        f"record_id   : {entry.get('record_id', '')}\n"
-        f"start       : {entry['start_timestamp']}\n"
-        f"end         : {entry['end_timestamp']}\n"
-        f"duration    : {duration}\n"
-        f"status      : {entry['status']}\n"
-        f"error       : {entry['error']}"
+        f"filename      : {entry['filename']}\n"
+        f"md5           : {entry['md5']}\n"
+        f"manifest_hash : {entry.get('manifest_hash', '')}\n"
+        f"source        : {entry.get('source', 'process_all_pdfs.py')}\n"
+        f"source_path   : {entry.get('source_path', '')}\n"
+        f"destination   : {entry.get('destination', '')}\n"
+        f"record_id     : {entry.get('record_id', '')}\n"
+        f"rows_inserted : {entry.get('rows_inserted', '')}\n"
+        f"rows_skipped  : {entry.get('rows_skipped', '')}\n"
+        f"start         : {entry['start_timestamp']}\n"
+        f"end           : {entry['end_timestamp']}\n"
+        f"duration      : {duration}\n"
+        f"status        : {entry['status']}\n"
+        f"error         : {entry['error']}"
     )
 
     cutoff = datetime.now() - relativedelta(years=_RETENTION_YEARS)
@@ -135,36 +136,49 @@ for i, pdf_file in enumerate(pdf_files, 1):
     # Compute MD5 before the file is moved
     file_md5 = _compute_md5(pdf_file)
 
-    # Run the parser script
+    # Import deferred so errors surface per-file rather than aborting the batch
+    from parser.mpesa_parser import process_pdf_file  # noqa: PLC0415
+
     try:
         start_ts = datetime.now()
         print(f"Running parser with: {pdf_file}, {output_csv}, password: {password}")
 
-        result = subprocess.run([
-            sys.executable,
-            PARSER_SCRIPT,
-            pdf_file,
-            output_csv,
-            password
-        ], check=True, capture_output=True, text=True)
+        df = process_pdf_file(pdf_file)
 
         end_ts = datetime.now()
         print(f"Processing completed in {(end_ts - start_ts).total_seconds():.2f} seconds")
 
-        # Verify output file was created
-        if os.path.exists(output_csv):
+        if df is not None and os.path.exists(output_csv):
+            upload      = df.attrs.get("upload_result")
+            rows_ins    = upload.inserted      if upload else ""
+            rows_skip   = upload.skipped       if upload else ""
+            man_hash    = upload.manifest_hash if upload else ""
+
+            if upload and upload.inserted == 0 and upload.skipped > 0:
+                status = "SKIPPED"
+                error  = (
+                    f"{upload.skipped} row(s) already exist in the database "
+                    f"(receipt_no + amount conflict — possible duplicate submission)"
+                )
+            else:
+                status = "SUCCESS"
+                error  = ""
+
             print(f"✓ Successfully created CSV file: {output_csv}")
             successful_files.append(base_filename)
             _write_log({
                 "filename":        base_filename,
                 "md5":             file_md5,
+                "manifest_hash":   man_hash,
                 "source":          "process_all_pdfs.py",
                 "source_path":     os.path.abspath(pdf_file),
                 "destination":     os.path.abspath(output_csv),
+                "rows_inserted":   rows_ins,
+                "rows_skipped":    rows_skip,
                 "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
                 "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-                "status":          "SUCCESS",
-                "error":           "",
+                "status":          status,
+                "error":           error,
             })
             parsed_pdf_path = os.path.join(OUTPUT_DIR, base_filename)
             shutil.move(pdf_file, parsed_pdf_path)
@@ -175,50 +189,34 @@ for i, pdf_file in enumerate(pdf_files, 1):
             _write_log({
                 "filename":        base_filename,
                 "md5":             file_md5,
+                "manifest_hash":   "",
                 "source":          "process_all_pdfs.py",
                 "source_path":     os.path.abspath(pdf_file),
                 "destination":     os.path.abspath(output_csv),
+                "rows_inserted":   "",
+                "rows_skipped":    "",
                 "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
                 "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
                 "status":          "FAILED",
-                "error":           "CSV output not created",
+                "error":           "No transactions parsed or CSV not created",
             })
             failed_path = os.path.join(FAILED_DIR, base_filename)
             shutil.move(pdf_file, failed_path)
             print(f"  Moved failed PDF to: {failed_path}")
             failed_files.append(base_filename)
 
-    except subprocess.CalledProcessError as e:
-        end_ts = datetime.now()
-        error_msg = (e.stderr or str(e))[:500]
-        print(f"✗ Error processing {pdf_file}: {str(e)}")
-        if e.stderr:
-            print(f"  Error details: {e.stderr}")
-        _write_log({
-            "filename":        base_filename,
-            "md5":             file_md5,
-            "source":          "process_all_pdfs.py",
-            "source_path":     os.path.abspath(pdf_file),
-            "destination":     os.path.abspath(output_csv),
-            "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "status":          "FAILED",
-            "error":           error_msg.replace("\n", " "),
-        })
-        failed_path = os.path.join(FAILED_DIR, base_filename)
-        shutil.move(pdf_file, failed_path)
-        print(f"  Moved failed PDF to: {failed_path}")
-        failed_files.append(base_filename)
-
     except Exception as e:
         end_ts = datetime.now()
-        print(f"✗ Unexpected error processing {pdf_file}: {str(e)}")
+        print(f"✗ Error processing {pdf_file}: {str(e)}")
         _write_log({
             "filename":        base_filename,
             "md5":             file_md5,
+            "manifest_hash":   "",
             "source":          "process_all_pdfs.py",
             "source_path":     os.path.abspath(pdf_file),
             "destination":     os.path.abspath(output_csv),
+            "rows_inserted":   "",
+            "rows_skipped":    "",
             "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "status":          "FAILED",

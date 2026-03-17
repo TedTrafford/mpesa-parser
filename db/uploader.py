@@ -79,13 +79,52 @@ CREATE TABLE IF NOT EXISTS `{table}` (
     `balance`           DECIMAL(15, 2)      NOT NULL,
     `metadata`          JSON                NOT NULL,
     PRIMARY KEY (`id`),
-    UNIQUE KEY  `uq_receipt_no`        (`receipt_no`),
+    UNIQUE KEY  `uq_receipt_amount`    (`receipt_no`, `amount`),
     INDEX       `idx_record_id`        (`record_id`),
     INDEX       `idx_mobile_number`    (`mobile_number`),
     INDEX       `idx_transaction_date` (`transaction_date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='Raw M-PESA statement transactions parsed from PDF files'
 """.format(table=DB_TABLE)
+
+def _migrate_unique_key(conn) -> None:
+    """
+    Replace the old single-column unique key on receipt_no with a composite
+    key on (receipt_no, amount).
+
+    This allows M-PESA service charges to be stored alongside their parent
+    transactions — both rows share a receipt_no but carry different amounts,
+    so they are NOT duplicates.  True duplicates (identical receipt_no AND
+    amount) are still blocked by INSERT IGNORE.
+    """
+    # Check whether the old single-column key still exists
+    old_key_exists = conn.execute(text("""
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA    = DATABASE()
+          AND TABLE_NAME      = :tbl
+          AND CONSTRAINT_NAME = 'uq_receipt_no'
+          AND COLUMN_NAME     = 'receipt_no'
+    """), {"tbl": DB_TABLE}).scalar()
+
+    if old_key_exists:
+        conn.execute(text(
+            f"ALTER TABLE `{DB_TABLE}` DROP INDEX `uq_receipt_no`"
+        ))
+
+    # Add the composite key if it does not yet exist
+    new_key_exists = conn.execute(text("""
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = :tbl
+          AND INDEX_NAME   = 'uq_receipt_amount'
+    """), {"tbl": DB_TABLE}).scalar()
+
+    if not new_key_exists:
+        conn.execute(text(
+            f"ALTER TABLE `{DB_TABLE}` "
+            f"ADD UNIQUE KEY `uq_receipt_amount` (`receipt_no`, `amount`)"
+        ))
+
 
 def _migrate_record_id(conn) -> None:
     """
@@ -143,11 +182,12 @@ def get_engine():
 
 def ensure_table_exists():
     """Create tbl_raw_mpesa_statements if it does not already exist,
-    and add record_id to tables that predate that column."""
+    and run any pending schema migrations."""
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text(_CREATE_TABLE_SQL))
         _migrate_record_id(conn)
+        _migrate_unique_key(conn)
     print(f"  DB: table `{DB_TABLE}` is ready")
 
 
