@@ -8,7 +8,7 @@ import re
 import hashlib
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from config import INPUT_DIR, OUTPUT_DIR, FAILED_DIR, LOG_DIR
+from config import INPUT_DIR, OUTPUT_DIR, FAILED_DIR, LOG_DIR, PARSER_SCRIPT
 from db.uploader import insert_processing_log
 
 LOG_FILE = os.path.join(LOG_DIR, "processing_log.log")
