@@ -213,26 +213,36 @@ def parse_mpesa_statement(text, pdf_path):
     print(f"Successfully processed {len(transactions)} transactions")
     return transactions
 
-def _attach_metadata(df, pdf_path, output_csv):
+def _attach_metadata(df, pdf_path, output_csv, pin=None, start_time=None, end_time=None):
     """
     Append a 'metadata' column to *df* containing a JSON object per row with:
 
-    - manifest_hash  : MD5 of (filename bytes + file content bytes)
-    - pin            : source filename without the .pdf extension
-    - record_uuid    : a unique UUID4 for this individual transaction row
+    - manifest_hash   : MD5 of (filename bytes + file content bytes)
+    - pin             : PDF decryption password; falls back to the filename stem
+                        when not explicitly supplied (batch-mode path)
+    - record_uuid     : a unique UUID4 for this individual transaction row
     - output_file_path: absolute path to the CSV file where this row is stored
+    - start_time      : ISO-8601 timestamp when processing began
+    - end_time        : ISO-8601 timestamp when processing completed
     """
     manifest_hash = compute_manifest_hash(pdf_path)
-    pin = os.path.splitext(os.path.basename(pdf_path))[0]
+    if pin is None:
+        pin = os.path.splitext(os.path.basename(pdf_path))[0]
     abs_output = os.path.abspath(output_csv)
+
+    _fmt = "%Y-%m-%dT%H:%M:%S"
+    start_str = start_time.strftime(_fmt) if isinstance(start_time, datetime) else (start_time or "")
+    end_str   = end_time.strftime(_fmt)   if isinstance(end_time,   datetime) else (end_time   or "")
 
     df["metadata"] = [
         json.dumps(
             {
-                "manifest_hash": manifest_hash,
-                "pin": pin,
-                "record_uuid": str(uuid.uuid4()),
+                "manifest_hash":    manifest_hash,
+                "pin":              pin,
+                "record_uuid":      str(uuid.uuid4()),
                 "output_file_path": abs_output,
+                "start_time":       start_str,
+                "end_time":         end_str,
             },
             separators=(",", ":"),
         )
@@ -244,7 +254,9 @@ def _attach_metadata(df, pdf_path, output_csv):
 def process_pdf_file(pdf_path):
     """Process a single PDF file and save the output to CSV."""
     print(f"\nProcessing PDF file: {pdf_path}")
-    
+
+    start_time = datetime.now()
+
     # Extract text from PDF
     text = extract_text_from_pdf(pdf_path)
     
@@ -257,23 +269,22 @@ def process_pdf_file(pdf_path):
     
     # Create DataFrame
     df = pd.DataFrame(transactions)
-    
+    df["Record ID"] = ""        # no caller-supplied record_id in batch mode
+
     # Create output directory if it doesn't exist
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
+
     # Save to CSV with same name as PDF but with .csv extension
     base_filename = os.path.basename(pdf_path)
     output_csv = os.path.join(OUTPUT_DIR, base_filename.replace('.pdf', '.csv'))
 
-    df = _attach_metadata(df, pdf_path, output_csv)
+    end_time = datetime.now()
+    df = _attach_metadata(df, pdf_path, output_csv, start_time=start_time, end_time=end_time)
 
     df.to_csv(output_csv, index=False)
     print(f"Data saved to {output_csv}")
 
-    try:
-        upload_to_mysql(df)
-    except Exception as exc:
-        print(f"  DB upload failed (CSV still saved): {exc}")
+    df.attrs["upload_result"] = upload_to_mysql(df)
 
     # Display DataFrame summary
     print(f"Total transactions in CSV: {len(df)}")
@@ -282,47 +293,55 @@ def process_pdf_file(pdf_path):
 
     return df
 
-def process_single_file(pdf_path, output_csv=None, password=None):
-    """Process a single PDF file with optional parameters."""
+def process_single_file(pdf_path, output_csv=None, password=None, record_id=None):
+    """Process a single PDF file with optional parameters.
+
+    Parameters
+    ----------
+    pdf_path   : path to the PDF file
+    output_csv : explicit output CSV path; defaults to OUTPUT_DIR/<stem>.csv
+    password   : PDF decryption password; falls back to filename-derived PIN
+    record_id  : caller-supplied unique identifier stored in the record_id DB column
+    """
     global PASSWORD
     PASSWORD = password
-    
+
+    start_time = datetime.now()
+
     # Extract text from PDF
     text = extract_text_from_pdf(pdf_path)
-    
+
     # Parse transactions
     transactions = parse_mpesa_statement(text, pdf_path)
-    
+
     if not transactions:
         print("No transactions were parsed from the PDF")
         return None
-    
+
     # Create DataFrame
     df = pd.DataFrame(transactions)
+    df["Record ID"] = str(record_id) if record_id is not None else ""
+
+    end_time = datetime.now()
 
     # Save to CSV
     if output_csv:
-        df = _attach_metadata(df, pdf_path, output_csv)
+        df = _attach_metadata(df, pdf_path, output_csv, pin=password, start_time=start_time, end_time=end_time)
         df.to_csv(output_csv, index=False)
         print(f"Data saved to {output_csv}")
     else:
-        # Use default naming with PDF filename
         base_filename = os.path.basename(pdf_path)
         default_output = os.path.join(OUTPUT_DIR, base_filename.replace('.pdf', '.csv'))
-        df = _attach_metadata(df, pdf_path, default_output)
+        df = _attach_metadata(df, pdf_path, default_output, pin=password, start_time=start_time, end_time=end_time)
         df.to_csv(default_output, index=False)
         print(f"Data saved to {default_output}")
 
-    try:
-        upload_to_mysql(df)
-    except Exception as exc:
-        print(f"  DB upload failed (CSV still saved): {exc}")
-    
-    # Display DataFrame summary
+    df.attrs["upload_result"] = upload_to_mysql(df)
+
     print(f"Total transactions in CSV: {len(df)}")
     print("\nFirst few transactions:")
     print(df.head())
-    
+
     return df
 
 def main():
