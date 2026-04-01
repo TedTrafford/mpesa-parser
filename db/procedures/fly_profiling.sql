@@ -301,41 +301,22 @@ BEGIN
     END;
 
     SET var_credit_limit = CASE
-        WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 8 THEN 6000
-        WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 7 THEN 6000
-        WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 6 THEN 5000
+        WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 8 THEN 8000
+        WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 7 THEN 7000
+        WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 6 THEN 6000
         WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 5 THEN 5000
-        WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 4 THEN 4000
-        WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 3 THEN 3000
-        WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 2 THEN 2000
         
-        WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 8 THEN 6000
+        WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 8 THEN 8000
         WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 7 THEN 6000
-        WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 6 THEN 4000
-        WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 5 THEN 4000
-        WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 4 THEN 3000
-        WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 3 THEN 2000
+        WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 6 THEN 5000
+
+        WHEN age_days >= 90 AND risk_segment = 6 AND turnover_segment = 8 THEN 6000
+        WHEN age_days >= 90 AND risk_segment = 6 AND turnover_segment = 7 THEN 5000
         
-        WHEN age_days >= 90 AND risk_segment = 6 AND turnover_segment = 8 THEN 4000
-        WHEN age_days >= 90 AND risk_segment = 6 AND turnover_segment = 7 THEN 4000
-        WHEN age_days >= 90 AND risk_segment = 6 AND turnover_segment = 6 THEN 4000
-        WHEN age_days >= 90 AND risk_segment = 6 AND turnover_segment = 5 THEN 3000
-        WHEN age_days >= 90 AND risk_segment = 6 AND turnover_segment = 4 THEN 2000
-        
-        WHEN age_days >= 90 AND risk_segment = 5 AND turnover_segment = 8 THEN 3000
-        WHEN age_days >= 90 AND risk_segment = 5 AND turnover_segment = 7 THEN 3000
-        WHEN age_days >= 90 AND risk_segment = 5 AND turnover_segment = 6 THEN 3000
-        WHEN age_days >= 90 AND risk_segment = 5 AND turnover_segment = 5 THEN 2500
-        
-        WHEN age_days >= 90 AND risk_segment = 4 AND turnover_segment = 8 THEN 2000
-        WHEN age_days >= 90 AND risk_segment = 4 AND turnover_segment = 7 THEN 2000
-        WHEN age_days >= 90 AND risk_segment = 4 AND turnover_segment = 6 THEN 2000
-        
-        WHEN age_days >= 90 AND risk_segment = 3 AND turnover_segment = 8 THEN 2000
-        WHEN age_days >= 90 AND risk_segment = 3 AND turnover_segment = 7 THEN 2000
+        WHEN age_days >= 90 AND risk_segment = 5 AND turnover_segment = 8 THEN 5000
 
         ELSE 0
-    END;
+    END; 
 
     SET model_category = CASE
         WHEN age_days >= 90 AND (
