@@ -53,7 +53,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 from config import FAILED_DIR, LOG_DIR, OUTPUT_DIR  # noqa: E402
-from db.uploader import insert_processing_log       # noqa: E402
+from db.uploader import get_engine, insert_processing_log  # noqa: E402
 
 # ── queue / lock paths ────────────────────────────────────────────────────────
 _QUEUE_ROOT   = os.path.join(ROOT, "queue")
@@ -200,6 +200,30 @@ def _update_job_file(job_file: str, **fields) -> dict:
     return job
 
 
+def _call_fly_profiling(mobile_number: str) -> None:
+    """Execute CALL fly_profiling('<mobile_number>') against the configured DB.
+
+    Errors are printed but do not propagate — a profiling failure should never
+    cause the overall parse job to be marked as failed.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    if not mobile_number:
+        print("[profiling] skipped — mobile number is empty", file=sys.stderr)
+        return
+
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            conn.execute(text("CALL fly_profiling(:phone)"), {"phone": mobile_number})
+        print(f"[profiling] fly_profiling('{mobile_number}') completed")
+    except Exception as exc:
+        print(
+            f"[profiling] WARNING: fly_profiling('{mobile_number}') failed: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _process_job(job: dict) -> tuple:
     """Execute a single queued job.
 
@@ -236,6 +260,11 @@ def _process_job(job: dict) -> tuple:
         rows_skipped  = upload.skipped       if upload else ""
         manifest_hash = upload.manifest_hash if upload else ""
 
+        # Extract the mobile number for the profiling call
+        mobile_number = ""
+        if success and len(result) > 0 and "Mobile Number" in result.columns:
+            mobile_number = str(result["Mobile Number"].iloc[0]).strip()
+
         if not success:
             status = "FAILED"
             error  = "process_single_file returned None"
@@ -266,6 +295,10 @@ def _process_job(job: dict) -> tuple:
         }
         _write_log(log_entry)
         insert_processing_log(log_entry)
+
+        if success and mobile_number:
+            _call_fly_profiling(mobile_number)
+
         return success, error
 
     except Exception as exc:
