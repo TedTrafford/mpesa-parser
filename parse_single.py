@@ -200,11 +200,15 @@ def _update_job_file(job_file: str, **fields) -> dict:
     return job
 
 
-def _call_fly_profiling(mobile_number: str) -> None:
+def call_fly_profiling(mobile_number: str) -> None:
     """Execute CALL fly_profiling('<mobile_number>') against the configured DB.
 
-    Errors are printed but do not propagate — a profiling failure should never
-    cause the overall parse job to be marked as failed.
+    The procedure is deployed automatically at startup via the migration in
+    db/uploader.ensure_table_exists().  Call this function explicitly when
+    you need to trigger profiling for a specific subscriber — it is no longer
+    invoked automatically after every parse job.
+
+    Errors are printed but do not propagate.
     """
     from sqlalchemy import text  # noqa: PLC0415
 
@@ -260,11 +264,6 @@ def _process_job(job: dict) -> tuple:
         rows_skipped  = upload.skipped       if upload else ""
         manifest_hash = upload.manifest_hash if upload else ""
 
-        # Extract the mobile number for the profiling call
-        mobile_number = ""
-        if success and len(result) > 0 and "Mobile Number" in result.columns:
-            mobile_number = str(result["Mobile Number"].iloc[0]).strip()
-
         if not success:
             status = "FAILED"
             error  = "process_single_file returned None"
@@ -295,9 +294,6 @@ def _process_job(job: dict) -> tuple:
         }
         _write_log(log_entry)
         insert_processing_log(log_entry)
-
-        if success and mobile_number:
-            _call_fly_profiling(mobile_number)
 
         return success, error
 

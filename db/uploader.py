@@ -12,6 +12,7 @@ rows are preserved for duplicate and fraud identification.
 
 import json
 import os
+import re
 import sys
 import traceback
 from collections import namedtuple
@@ -180,14 +181,51 @@ def get_engine():
     return _engine
 
 
+_PROCEDURES_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "db", "procedures",
+)
+
+
+def _deploy_fly_profiling_procedure(conn) -> None:
+    """Read db/procedures/fly_profiling.sql and (re)create the stored procedure.
+
+    The DEFINER clause is stripped so the deploying DB user does not need
+    SUPER / SET_USER_ID privilege.  The DROP + CREATE pair is idempotent —
+    safe to call on every startup.  Edit fly_profiling.sql and restart the
+    app to pick up changes automatically.
+    """
+    sql_path = os.path.join(_PROCEDURES_DIR, "fly_profiling.sql")
+    if not os.path.exists(sql_path):
+        print("  DB: fly_profiling.sql not found — skipping procedure deployment")
+        return
+
+    with open(sql_path, "r", encoding="utf-8") as fh:
+        proc_sql = fh.read().strip()
+
+    # Strip DEFINER clause — MySQL rejects it unless the caller has
+    # SUPER or SET_USER_ID; the procedure will be owned by the session user.
+    proc_sql = re.sub(
+        r"DEFINER\s*=\s*`[^`]+`@`[^`]+`\s*",
+        "",
+        proc_sql,
+        flags=re.IGNORECASE,
+    )
+
+    conn.execute(text("DROP PROCEDURE IF EXISTS `fly_profiling`"))
+    conn.execute(text(proc_sql))
+    print("  DB: procedure `fly_profiling` deployed")
+
+
 def ensure_table_exists():
     """Create tbl_raw_mpesa_statements if it does not already exist,
-    and run any pending schema migrations."""
+    and run any pending schema migrations including procedure deployment."""
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text(_CREATE_TABLE_SQL))
         _migrate_record_id(conn)
         _migrate_unique_key(conn)
+        _deploy_fly_profiling_procedure(conn)
     print(f"  DB: table `{DB_TABLE}` is ready")
 
 
