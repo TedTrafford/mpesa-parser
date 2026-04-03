@@ -52,7 +52,7 @@ from dateutil.relativedelta import relativedelta
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-from config import FAILED_DIR, LOG_DIR, OUTPUT_DIR  # noqa: E402
+from config import FAILED_DIR, LOG_DIR, OUTPUT_DIR, normalize_mobile_number  # noqa: E402
 from db.uploader import get_engine, insert_processing_log  # noqa: E402
 
 # ── queue / lock paths ────────────────────────────────────────────────────────
@@ -219,6 +219,8 @@ def call_fly_profiling(mobile_number: str) -> str:
     if not mobile_number:
         print("[profiling] skipped — mobile number is empty", file=sys.stderr)
         return "SKIPPED"
+
+    mobile_number = normalize_mobile_number(mobile_number)
 
     try:
         engine = get_engine()

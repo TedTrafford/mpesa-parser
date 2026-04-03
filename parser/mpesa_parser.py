@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     INPUT_DIR, OUTPUT_DIR, FAILED_DIR,
     TRANSACTION_PATTERN, get_transaction_type, DATE_FORMAT,
+    normalize_mobile_number,
 )
 from db.uploader import upload_to_mysql
 
@@ -100,10 +101,10 @@ def extract_customer_info(text):
     if name_match:
         customer_info['Customer Name'] = name_match.group(1).strip()
     
-    # Extract mobile number
+    # Extract mobile number and normalise to international format (e.g. 0722xxx → 254722xxx)
     mobile_match = re.search(r'Mobile Number:\s*(\d+)', text)
     if mobile_match:
-        customer_info['Mobile Number'] = mobile_match.group(1).strip()
+        customer_info['Mobile Number'] = normalize_mobile_number(mobile_match.group(1).strip())
     
     # Extract email address
     email_match = re.search(r'Email Address:\s*(.+)', text)

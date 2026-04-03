@@ -272,7 +272,7 @@ BEGIN
             ROW_NUMBER() OVER (PARTITION BY mobile_number
                                ORDER BY date_created DESC) AS rn
         FROM  tbl_scoring_features
-        WHERE mobile_number = CAST(ip_mobile_number AS DECIMAL(18, 0))
+        WHERE mobile_number = ip_mobile_number
     ) AS latest_records
     WHERE rn = 1;
 
