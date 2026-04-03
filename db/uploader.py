@@ -217,6 +217,31 @@ def _deploy_fly_profiling_procedure(conn) -> None:
     print("  DB: procedure `fly_profiling` deployed")
 
 
+def _migrate_normalize_mobile_numbers(conn) -> None:
+    """Normalize mobile_number values from local format (0xxx) to international
+    format (254xxx) in tbl_raw_mpesa_statements.
+
+    Runs only when un-normalised rows are present — subsequent calls are
+    no-ops.  This one-time migration aligns historical data with the
+    normalization applied by normalize_mobile_number() in config.py so that
+    fly_profiling() joins work correctly.
+    """
+    count = conn.execute(text(f"""
+        SELECT COUNT(*) FROM `{DB_TABLE}`
+        WHERE mobile_number LIKE '0%'
+    """)).scalar()
+
+    if count:
+        conn.execute(text(f"""
+            UPDATE `{DB_TABLE}`
+            SET    mobile_number = CONCAT('254', SUBSTRING(mobile_number, 2))
+            WHERE  mobile_number LIKE '0%'
+        """))
+        print(f"  DB: normalised {count} mobile number(s) in `{DB_TABLE}` (0xxx → 254xxx)")
+    else:
+        print(f"  DB: mobile numbers in `{DB_TABLE}` already normalised — no update needed")
+
+
 def ensure_table_exists():
     """Create tbl_raw_mpesa_statements if it does not already exist,
     and run any pending schema migrations including procedure deployment."""
@@ -225,6 +250,7 @@ def ensure_table_exists():
         conn.execute(text(_CREATE_TABLE_SQL))
         _migrate_record_id(conn)
         _migrate_unique_key(conn)
+        _migrate_normalize_mobile_numbers(conn)
         _deploy_fly_profiling_procedure(conn)
     print(f"  DB: table `{DB_TABLE}` is ready")
 

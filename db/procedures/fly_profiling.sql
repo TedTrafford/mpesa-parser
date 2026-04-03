@@ -19,6 +19,19 @@ BEGIN
 
     DECLARE CONTINUE HANDLER FOR NOT FOUND BEGIN END;
 
+    -- -------------------------------------------------------------------------
+    -- Normalise the input to the international format (254xxx).
+    -- Handles three forms:
+    --   '0722123456'    -> '254722123456'   local trunk prefix
+    --   '+254722123456' -> '254722123456'   E.164 with leading '+'
+    --   '254722123456'  -> '254722123456'   already normalised (no-op)
+    -- -------------------------------------------------------------------------
+    IF ip_mobile_number LIKE '0%' THEN
+        SET ip_mobile_number = CONCAT('254', SUBSTRING(ip_mobile_number, 2));
+    ELSEIF ip_mobile_number LIKE '+%' THEN
+        SET ip_mobile_number = SUBSTRING(ip_mobile_number, 2);
+    END IF;
+
     SELECT mobile_number INTO update_check
     FROM   customer_credit_limit
     WHERE  mobile_number = ip_mobile_number
