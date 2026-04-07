@@ -2,29 +2,30 @@
 -- M-Pesa 207-Feature Engineering Query
 -- Table   : tbl_raw_mpesa_statements  (Data_Science database)
 -- Purpose : Credit-scoring feature extraction, grouped by mobile_number
--- Windows : Rolling 1M / 3M / 6M anchored on each customer's latest transaction_date
--- Features: 207 total across 17 groups
+-- Windows : Rolling 1M / 3M / 5M anchored on each customer's latest transaction_date
+-- Features: 208 total across 17 groups (+1 default_flag)
 -- ============================================================================
 --
 -- Feature groups & counts
---   1.  ALL_SEND_MONEY       12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---   2.  ALL_RECEIVED_MONEY   12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---   3.  P2P_SEND_MONEY       15  (SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/6M)
---   4.  P2P_RECEIVED_MONEY   15  (SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/6M)
---   5.  AGENT_WITHDRAWAL     15  (SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/6M)
---   6.  ALL_PAYBILLS         12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---   7.  KPLC_PAYBILLS        12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---   8.  STK_WITHDRAWAL       12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---   9.  STK_DEPOSIT          12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---  10.  AIRTIME              12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---  11.  FLZ (Fuliza)         12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---  12.  MERCH (Merchant)     12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---  13.  P2P_FLZ               9  (AVG, MAX, CNT          × 1M/3M/6M)
---  14.  BET (Betting)        12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---  15.  BANK_DEPOSIT         12  (SUM, AVG, MAX, CNT     × 1M/3M/6M)
---  16.  BALANCE               9  (AVG, MAX, MIN          × 1M/3M/6M)
+--   1.  ALL_SEND_MONEY       12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--   2.  ALL_RECEIVED_MONEY   12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--   3.  P2P_SEND_MONEY       15  (SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/5M)
+--   4.  P2P_RECEIVED_MONEY   15  (SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/5M)
+--   5.  AGENT_WITHDRAWAL     15  (SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/5M)
+--   6.  ALL_PAYBILLS         12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--   7.  KPLC_PAYBILLS        12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--   8.  STK_WITHDRAWAL       12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--   9.  STK_DEPOSIT          12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--  10.  AIRTIME              12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--  11.  FLZ (Fuliza)         12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--  12.  MERCH (Merchant)     12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--  13.  P2P_FLZ               9  (AVG, MAX, CNT          × 1M/3M/5M)
+--  14.  BET (Betting)        12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--  15.  BANK_DEPOSIT         12  (SUM, AVG, MAX, CNT     × 1M/3M/5M)
+--  16.  BALANCE               9  (AVG, MAX, MIN          × 1M/3M/5M)
 --  17.  DERIVED              12  (NET_CASHFLOW, NET_CNT_SENDER,
---                                 NET_CNT_UNQ_SENDER, NET_BANKED × 1M/3M/6M)
+--                                 NET_CNT_UNQ_SENDER, NET_BANKED × 1M/3M/5M)
+--  18.  DEFAULT_FLAG          1  (derived from ALL_RECEIVED_MONEY_SUM_1M)
 -- ============================================================================
 
 -- customer_ref: one row per mobile_number, holding their latest transaction date
@@ -210,14 +211,14 @@ flagged AS (
 
     FROM tbl_raw_mpesa_statements t
     JOIN customer_ref cr ON t.mobile_number = cr.mobile_number
-    WHERE t.transaction_date >= DATE_SUB(cr.ref_date, INTERVAL 6 MONTH)
+    WHERE t.transaction_date >= DATE_SUB(cr.ref_date, INTERVAL 5 MONTH)
 )
 
 SELECT
     mobile_number,
 
     -- =========================================================================
-    -- 1. ALL_SEND_MONEY  │  SUM, AVG, MAX, CNT × 1M / 3M / 6M  │  12 features
+    -- 1. ALL_SEND_MONEY  │  SUM, AVG, MAX, CNT × 1M / 3M / 5M  │  12 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_send = 1 THEN abs_amt END), 0)   AS ALL_SEND_MONEY_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_send = 1 THEN abs_amt END), 0)   AS ALL_SEND_MONEY_AVG_1M,
@@ -229,13 +230,13 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_send = 1 THEN abs_amt END), 0)   AS ALL_SEND_MONEY_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_send = 1 THEN 1     END)         AS ALL_SEND_MONEY_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_send = 1 THEN abs_amt END), 0)   AS ALL_SEND_MONEY_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_send = 1 THEN abs_amt END), 0)   AS ALL_SEND_MONEY_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_send = 1 THEN abs_amt END), 0)   AS ALL_SEND_MONEY_MAX_6M,
-           COUNT(CASE WHEN f_send = 1 THEN 1     END)         AS ALL_SEND_MONEY_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_send = 1 THEN abs_amt END), 0)   AS ALL_SEND_MONEY_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_send = 1 THEN abs_amt END), 0)   AS ALL_SEND_MONEY_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_send = 1 THEN abs_amt END), 0)   AS ALL_SEND_MONEY_MAX_5M,
+           COUNT(CASE WHEN f_send = 1 THEN 1     END)         AS ALL_SEND_MONEY_CNT_5M,
 
     -- =========================================================================
-    -- 2. ALL_RECEIVED_MONEY  │  SUM, AVG, MAX, CNT × 1M / 3M / 6M  │  12 features
+    -- 2. ALL_RECEIVED_MONEY  │  SUM, AVG, MAX, CNT × 1M / 3M / 5M  │  12 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_recv = 1 THEN abs_amt END), 0)   AS ALL_RECEIVED_MONEY_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_recv = 1 THEN abs_amt END), 0)   AS ALL_RECEIVED_MONEY_AVG_1M,
@@ -247,13 +248,13 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_recv = 1 THEN abs_amt END), 0)   AS ALL_RECEIVED_MONEY_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_recv = 1 THEN 1     END)         AS ALL_RECEIVED_MONEY_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_recv = 1 THEN abs_amt END), 0)   AS ALL_RECEIVED_MONEY_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_recv = 1 THEN abs_amt END), 0)   AS ALL_RECEIVED_MONEY_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_recv = 1 THEN abs_amt END), 0)   AS ALL_RECEIVED_MONEY_MAX_6M,
-           COUNT(CASE WHEN f_recv = 1 THEN 1     END)         AS ALL_RECEIVED_MONEY_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_recv = 1 THEN abs_amt END), 0)   AS ALL_RECEIVED_MONEY_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_recv = 1 THEN abs_amt END), 0)   AS ALL_RECEIVED_MONEY_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_recv = 1 THEN abs_amt END), 0)   AS ALL_RECEIVED_MONEY_MAX_5M,
+           COUNT(CASE WHEN f_recv = 1 THEN 1     END)         AS ALL_RECEIVED_MONEY_CNT_5M,
 
     -- =========================================================================
-    -- 3. P2P_SEND_MONEY  │  SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/6M  │  15 features
+    -- 3. P2P_SEND_MONEY  │  SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/5M  │  15 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_p2p_send = 1 THEN abs_amt END), 0)                     AS P2P_SEND_MONEY_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_p2p_send = 1 THEN abs_amt END), 0)                     AS P2P_SEND_MONEY_AVG_1M,
@@ -267,14 +268,14 @@ SELECT
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_p2p_send = 1 THEN 1        END)                        AS P2P_SEND_MONEY_CNT_3M,
     COUNT(DISTINCT CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_p2p_send = 1 THEN p2p_send_cpty END)                 AS P2P_SEND_MONEY_UNQ_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_p2p_send = 1 THEN abs_amt END), 0)   AS P2P_SEND_MONEY_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_p2p_send = 1 THEN abs_amt END), 0)   AS P2P_SEND_MONEY_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_p2p_send = 1 THEN abs_amt END), 0)   AS P2P_SEND_MONEY_MAX_6M,
-           COUNT(CASE WHEN f_p2p_send = 1 THEN 1        END)      AS P2P_SEND_MONEY_CNT_6M,
-    COUNT(DISTINCT CASE WHEN f_p2p_send = 1 THEN p2p_send_cpty END) AS P2P_SEND_MONEY_UNQ_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_p2p_send = 1 THEN abs_amt END), 0)   AS P2P_SEND_MONEY_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_p2p_send = 1 THEN abs_amt END), 0)   AS P2P_SEND_MONEY_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_p2p_send = 1 THEN abs_amt END), 0)   AS P2P_SEND_MONEY_MAX_5M,
+           COUNT(CASE WHEN f_p2p_send = 1 THEN 1        END)      AS P2P_SEND_MONEY_CNT_5M,
+    COUNT(DISTINCT CASE WHEN f_p2p_send = 1 THEN p2p_send_cpty END) AS P2P_SEND_MONEY_UNQ_CNT_5M,
 
     -- =========================================================================
-    -- 4. P2P_RECEIVED_MONEY  │  SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/6M  │  15 features
+    -- 4. P2P_RECEIVED_MONEY  │  SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/5M  │  15 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_p2p_recv = 1 THEN abs_amt END), 0)                     AS P2P_RECEIVED_MONEY_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_p2p_recv = 1 THEN abs_amt END), 0)                     AS P2P_RECEIVED_MONEY_AVG_1M,
@@ -288,14 +289,14 @@ SELECT
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_p2p_recv = 1 THEN 1        END)                        AS P2P_RECEIVED_MONEY_CNT_3M,
     COUNT(DISTINCT CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_p2p_recv = 1 THEN p2p_recv_cpty END)                 AS P2P_RECEIVED_MONEY_UNQ_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_p2p_recv = 1 THEN abs_amt END), 0)   AS P2P_RECEIVED_MONEY_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_p2p_recv = 1 THEN abs_amt END), 0)   AS P2P_RECEIVED_MONEY_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_p2p_recv = 1 THEN abs_amt END), 0)   AS P2P_RECEIVED_MONEY_MAX_6M,
-           COUNT(CASE WHEN f_p2p_recv = 1 THEN 1        END)      AS P2P_RECEIVED_MONEY_CNT_6M,
-    COUNT(DISTINCT CASE WHEN f_p2p_recv = 1 THEN p2p_recv_cpty END) AS P2P_RECEIVED_MONEY_UNQ_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_p2p_recv = 1 THEN abs_amt END), 0)   AS P2P_RECEIVED_MONEY_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_p2p_recv = 1 THEN abs_amt END), 0)   AS P2P_RECEIVED_MONEY_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_p2p_recv = 1 THEN abs_amt END), 0)   AS P2P_RECEIVED_MONEY_MAX_5M,
+           COUNT(CASE WHEN f_p2p_recv = 1 THEN 1        END)      AS P2P_RECEIVED_MONEY_CNT_5M,
+    COUNT(DISTINCT CASE WHEN f_p2p_recv = 1 THEN p2p_recv_cpty END) AS P2P_RECEIVED_MONEY_UNQ_CNT_5M,
 
     -- =========================================================================
-    -- 5. AGENT_WITHDRAWAL  │  SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/6M  │  15 features
+    -- 5. AGENT_WITHDRAWAL  │  SUM, AVG, MAX, CNT, UNQ_CNT × 1M/3M/5M  │  15 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_agent_wd = 1 THEN abs_amt END), 0)                     AS AGENT_WITHDRAWAL_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_agent_wd = 1 THEN abs_amt END), 0)                     AS AGENT_WITHDRAWAL_AVG_1M,
@@ -309,14 +310,14 @@ SELECT
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_agent_wd = 1 THEN 1        END)                        AS AGENT_WITHDRAWAL_CNT_3M,
     COUNT(DISTINCT CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_agent_wd = 1 THEN agent_cpty END)                    AS AGENT_WITHDRAWAL_UNQ_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_agent_wd = 1 THEN abs_amt END), 0)   AS AGENT_WITHDRAWAL_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_agent_wd = 1 THEN abs_amt END), 0)   AS AGENT_WITHDRAWAL_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_agent_wd = 1 THEN abs_amt END), 0)   AS AGENT_WITHDRAWAL_MAX_6M,
-           COUNT(CASE WHEN f_agent_wd = 1 THEN 1        END)      AS AGENT_WITHDRAWAL_CNT_6M,
-    COUNT(DISTINCT CASE WHEN f_agent_wd = 1 THEN agent_cpty END)  AS AGENT_WITHDRAWAL_UNQ_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_agent_wd = 1 THEN abs_amt END), 0)   AS AGENT_WITHDRAWAL_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_agent_wd = 1 THEN abs_amt END), 0)   AS AGENT_WITHDRAWAL_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_agent_wd = 1 THEN abs_amt END), 0)   AS AGENT_WITHDRAWAL_MAX_5M,
+           COUNT(CASE WHEN f_agent_wd = 1 THEN 1        END)      AS AGENT_WITHDRAWAL_CNT_5M,
+    COUNT(DISTINCT CASE WHEN f_agent_wd = 1 THEN agent_cpty END)  AS AGENT_WITHDRAWAL_UNQ_CNT_5M,
 
     -- =========================================================================
-    -- 6. ALL_PAYBILLS  │  SUM, AVG, MAX, CNT × 1M/3M/6M  │  12 features
+    -- 6. ALL_PAYBILLS  │  SUM, AVG, MAX, CNT × 1M/3M/5M  │  12 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_paybill = 1 THEN abs_amt END), 0)   AS ALL_PAYBILLS_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_paybill = 1 THEN abs_amt END), 0)   AS ALL_PAYBILLS_AVG_1M,
@@ -328,13 +329,13 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_paybill = 1 THEN abs_amt END), 0)   AS ALL_PAYBILLS_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_paybill = 1 THEN 1     END)         AS ALL_PAYBILLS_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_paybill = 1 THEN abs_amt END), 0)   AS ALL_PAYBILLS_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_paybill = 1 THEN abs_amt END), 0)   AS ALL_PAYBILLS_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_paybill = 1 THEN abs_amt END), 0)   AS ALL_PAYBILLS_MAX_6M,
-           COUNT(CASE WHEN f_paybill = 1 THEN 1     END)         AS ALL_PAYBILLS_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_paybill = 1 THEN abs_amt END), 0)   AS ALL_PAYBILLS_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_paybill = 1 THEN abs_amt END), 0)   AS ALL_PAYBILLS_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_paybill = 1 THEN abs_amt END), 0)   AS ALL_PAYBILLS_MAX_5M,
+           COUNT(CASE WHEN f_paybill = 1 THEN 1     END)         AS ALL_PAYBILLS_CNT_5M,
 
     -- =========================================================================
-    -- 7. KPLC_PAYBILLS  │  SUM, AVG, MAX, CNT × 1M/3M/6M  │  12 features
+    -- 7. KPLC_PAYBILLS  │  SUM, AVG, MAX, CNT × 1M/3M/5M  │  12 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_kplc = 1 THEN abs_amt END), 0)   AS KPLC_PAYBILLS_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_kplc = 1 THEN abs_amt END), 0)   AS KPLC_PAYBILLS_AVG_1M,
@@ -346,13 +347,13 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_kplc = 1 THEN abs_amt END), 0)   AS KPLC_PAYBILLS_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_kplc = 1 THEN 1     END)         AS KPLC_PAYBILLS_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_kplc = 1 THEN abs_amt END), 0)   AS KPLC_PAYBILLS_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_kplc = 1 THEN abs_amt END), 0)   AS KPLC_PAYBILLS_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_kplc = 1 THEN abs_amt END), 0)   AS KPLC_PAYBILLS_MAX_6M,
-           COUNT(CASE WHEN f_kplc = 1 THEN 1     END)         AS KPLC_PAYBILLS_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_kplc = 1 THEN abs_amt END), 0)   AS KPLC_PAYBILLS_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_kplc = 1 THEN abs_amt END), 0)   AS KPLC_PAYBILLS_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_kplc = 1 THEN abs_amt END), 0)   AS KPLC_PAYBILLS_MAX_5M,
+           COUNT(CASE WHEN f_kplc = 1 THEN 1     END)         AS KPLC_PAYBILLS_CNT_5M,
 
     -- =========================================================================
-    -- 8. STK_WITHDRAWAL  │  SUM, AVG, MAX, CNT × 1M/3M/6M  │  12 features
+    -- 8. STK_WITHDRAWAL  │  SUM, AVG, MAX, CNT × 1M/3M/5M  │  12 features
     -- Merchant/till cash withdrawn into M-Pesa wallet (positive flows)
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_stk_wd = 1 THEN abs_amt END), 0)   AS STK_WITHDRAWAL_SUM_1M,
@@ -365,13 +366,13 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_stk_wd = 1 THEN abs_amt END), 0)   AS STK_WITHDRAWAL_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_stk_wd = 1 THEN 1     END)         AS STK_WITHDRAWAL_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_stk_wd = 1 THEN abs_amt END), 0)   AS STK_WITHDRAWAL_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_stk_wd = 1 THEN abs_amt END), 0)   AS STK_WITHDRAWAL_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_stk_wd = 1 THEN abs_amt END), 0)   AS STK_WITHDRAWAL_MAX_6M,
-           COUNT(CASE WHEN f_stk_wd = 1 THEN 1     END)         AS STK_WITHDRAWAL_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_stk_wd = 1 THEN abs_amt END), 0)   AS STK_WITHDRAWAL_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_stk_wd = 1 THEN abs_amt END), 0)   AS STK_WITHDRAWAL_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_stk_wd = 1 THEN abs_amt END), 0)   AS STK_WITHDRAWAL_MAX_5M,
+           COUNT(CASE WHEN f_stk_wd = 1 THEN 1     END)         AS STK_WITHDRAWAL_CNT_5M,
 
     -- =========================================================================
-    -- 9. STK_DEPOSIT  │  SUM, AVG, MAX, CNT × 1M/3M/6M  │  12 features
+    -- 9. STK_DEPOSIT  │  SUM, AVG, MAX, CNT × 1M/3M/5M  │  12 features
     -- Cash deposited at an M-Pesa agent till (positive flows)
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_stk_dep = 1 THEN abs_amt END), 0)   AS STK_DEPOSIT_SUM_1M,
@@ -384,13 +385,13 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_stk_dep = 1 THEN abs_amt END), 0)   AS STK_DEPOSIT_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_stk_dep = 1 THEN 1     END)         AS STK_DEPOSIT_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_stk_dep = 1 THEN abs_amt END), 0)   AS STK_DEPOSIT_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_stk_dep = 1 THEN abs_amt END), 0)   AS STK_DEPOSIT_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_stk_dep = 1 THEN abs_amt END), 0)   AS STK_DEPOSIT_MAX_6M,
-           COUNT(CASE WHEN f_stk_dep = 1 THEN 1     END)         AS STK_DEPOSIT_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_stk_dep = 1 THEN abs_amt END), 0)   AS STK_DEPOSIT_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_stk_dep = 1 THEN abs_amt END), 0)   AS STK_DEPOSIT_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_stk_dep = 1 THEN abs_amt END), 0)   AS STK_DEPOSIT_MAX_5M,
+           COUNT(CASE WHEN f_stk_dep = 1 THEN 1     END)         AS STK_DEPOSIT_CNT_5M,
 
     -- =========================================================================
-    -- 10. AIRTIME  │  SUM, AVG, MAX, CNT × 1M/3M/6M  │  12 features
+    -- 10. AIRTIME  │  SUM, AVG, MAX, CNT × 1M/3M/5M  │  12 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_airtime = 1 THEN abs_amt END), 0)   AS AIRTIME_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_airtime = 1 THEN abs_amt END), 0)   AS AIRTIME_AVG_1M,
@@ -402,13 +403,13 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_airtime = 1 THEN abs_amt END), 0)   AS AIRTIME_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_airtime = 1 THEN 1     END)         AS AIRTIME_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_airtime = 1 THEN abs_amt END), 0)   AS AIRTIME_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_airtime = 1 THEN abs_amt END), 0)   AS AIRTIME_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_airtime = 1 THEN abs_amt END), 0)   AS AIRTIME_MAX_6M,
-           COUNT(CASE WHEN f_airtime = 1 THEN 1     END)         AS AIRTIME_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_airtime = 1 THEN abs_amt END), 0)   AS AIRTIME_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_airtime = 1 THEN abs_amt END), 0)   AS AIRTIME_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_airtime = 1 THEN abs_amt END), 0)   AS AIRTIME_MAX_5M,
+           COUNT(CASE WHEN f_airtime = 1 THEN 1     END)         AS AIRTIME_CNT_5M,
 
     -- =========================================================================
-    -- 11. FLZ (Fuliza repayments)  │  SUM, AVG, MAX, CNT × 1M/3M/6M  │  12 features
+    -- 11. FLZ (Fuliza repayments)  │  SUM, AVG, MAX, CNT × 1M/3M/5M  │  12 features
     -- OD Loan Repayment to 232323 (M-Pesa Overdraw) / 3201003 (Fuliza II)
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_flz = 1 THEN abs_amt END), 0)   AS FLZ_SUM_1M,
@@ -421,13 +422,13 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_flz = 1 THEN abs_amt END), 0)   AS FLZ_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_flz = 1 THEN 1     END)         AS FLZ_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_flz = 1 THEN abs_amt END), 0)   AS FLZ_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_flz = 1 THEN abs_amt END), 0)   AS FLZ_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_flz = 1 THEN abs_amt END), 0)   AS FLZ_MAX_6M,
-           COUNT(CASE WHEN f_flz = 1 THEN 1     END)         AS FLZ_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_flz = 1 THEN abs_amt END), 0)   AS FLZ_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_flz = 1 THEN abs_amt END), 0)   AS FLZ_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_flz = 1 THEN abs_amt END), 0)   AS FLZ_MAX_5M,
+           COUNT(CASE WHEN f_flz = 1 THEN 1     END)         AS FLZ_CNT_5M,
 
     -- =========================================================================
-    -- 12. MERCH (Merchant payments)  │  SUM, AVG, MAX, CNT × 1M/3M/6M  │  12 features
+    -- 12. MERCH (Merchant payments)  │  SUM, AVG, MAX, CNT × 1M/3M/5M  │  12 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_merch = 1 THEN abs_amt END), 0)   AS MERCH_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_merch = 1 THEN abs_amt END), 0)   AS MERCH_AVG_1M,
@@ -439,14 +440,14 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_merch = 1 THEN abs_amt END), 0)   AS MERCH_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_merch = 1 THEN 1     END)         AS MERCH_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_merch = 1 THEN abs_amt END), 0)   AS MERCH_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_merch = 1 THEN abs_amt END), 0)   AS MERCH_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_merch = 1 THEN abs_amt END), 0)   AS MERCH_MAX_6M,
-           COUNT(CASE WHEN f_merch = 1 THEN 1     END)         AS MERCH_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_merch = 1 THEN abs_amt END), 0)   AS MERCH_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_merch = 1 THEN abs_amt END), 0)   AS MERCH_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_merch = 1 THEN abs_amt END), 0)   AS MERCH_MAX_5M,
+           COUNT(CASE WHEN f_merch = 1 THEN 1     END)         AS MERCH_CNT_5M,
 
     -- =========================================================================
     -- 13. P2P_FLZ (P2P transfers funded by Fuliza credit)
-    --     │  AVG, MAX, CNT × 1M/3M/6M  │  9 features
+    --     │  AVG, MAX, CNT × 1M/3M/5M  │  9 features
     -- =========================================================================
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_p2p_flz = 1 THEN abs_amt END), 0)   AS P2P_FLZ_AVG_1M,
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_p2p_flz = 1 THEN abs_amt END), 0)   AS P2P_FLZ_MAX_1M,
@@ -456,12 +457,12 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_p2p_flz = 1 THEN abs_amt END), 0)   AS P2P_FLZ_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_p2p_flz = 1 THEN 1     END)         AS P2P_FLZ_CNT_3M,
 
-    COALESCE(AVG(CASE WHEN f_p2p_flz = 1 THEN abs_amt END), 0)   AS P2P_FLZ_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_p2p_flz = 1 THEN abs_amt END), 0)   AS P2P_FLZ_MAX_6M,
-           COUNT(CASE WHEN f_p2p_flz = 1 THEN 1     END)         AS P2P_FLZ_CNT_6M,
+    COALESCE(AVG(CASE WHEN f_p2p_flz = 1 THEN abs_amt END), 0)   AS P2P_FLZ_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_p2p_flz = 1 THEN abs_amt END), 0)   AS P2P_FLZ_MAX_5M,
+           COUNT(CASE WHEN f_p2p_flz = 1 THEN 1     END)         AS P2P_FLZ_CNT_5M,
 
     -- =========================================================================
-    -- 14. BET (Betting / gambling)  │  SUM, AVG, MAX, CNT × 1M/3M/6M  │  12 features
+    -- 14. BET (Betting / gambling)  │  SUM, AVG, MAX, CNT × 1M/3M/5M  │  12 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_bet = 1 THEN abs_amt END), 0)   AS BET_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_bet = 1 THEN abs_amt END), 0)   AS BET_AVG_1M,
@@ -473,13 +474,13 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_bet = 1 THEN abs_amt END), 0)   AS BET_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_bet = 1 THEN 1     END)         AS BET_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_bet = 1 THEN abs_amt END), 0)   AS BET_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_bet = 1 THEN abs_amt END), 0)   AS BET_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_bet = 1 THEN abs_amt END), 0)   AS BET_MAX_6M,
-           COUNT(CASE WHEN f_bet = 1 THEN 1     END)         AS BET_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_bet = 1 THEN abs_amt END), 0)   AS BET_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_bet = 1 THEN abs_amt END), 0)   AS BET_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_bet = 1 THEN abs_amt END), 0)   AS BET_MAX_5M,
+           COUNT(CASE WHEN f_bet = 1 THEN 1     END)         AS BET_CNT_5M,
 
     -- =========================================================================
-    -- 15. BANK_DEPOSIT (B2C from banks / MFIs)  │  SUM, AVG, MAX, CNT × 1M/3M/6M  │  12 features
+    -- 15. BANK_DEPOSIT (B2C from banks / MFIs)  │  SUM, AVG, MAX, CNT × 1M/3M/5M  │  12 features
     -- =========================================================================
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_bank_dep = 1 THEN abs_amt END), 0)   AS BANK_DEPOSIT_SUM_1M,
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_bank_dep = 1 THEN abs_amt END), 0)   AS BANK_DEPOSIT_AVG_1M,
@@ -491,13 +492,13 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_bank_dep = 1 THEN abs_amt END), 0)   AS BANK_DEPOSIT_MAX_3M,
            COUNT(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_bank_dep = 1 THEN 1     END)         AS BANK_DEPOSIT_CNT_3M,
 
-    COALESCE(SUM(CASE WHEN f_bank_dep = 1 THEN abs_amt END), 0)   AS BANK_DEPOSIT_SUM_6M,
-    COALESCE(AVG(CASE WHEN f_bank_dep = 1 THEN abs_amt END), 0)   AS BANK_DEPOSIT_AVG_6M,
-    COALESCE(MAX(CASE WHEN f_bank_dep = 1 THEN abs_amt END), 0)   AS BANK_DEPOSIT_MAX_6M,
-           COUNT(CASE WHEN f_bank_dep = 1 THEN 1     END)         AS BANK_DEPOSIT_CNT_6M,
+    COALESCE(SUM(CASE WHEN f_bank_dep = 1 THEN abs_amt END), 0)   AS BANK_DEPOSIT_SUM_5M,
+    COALESCE(AVG(CASE WHEN f_bank_dep = 1 THEN abs_amt END), 0)   AS BANK_DEPOSIT_AVG_5M,
+    COALESCE(MAX(CASE WHEN f_bank_dep = 1 THEN abs_amt END), 0)   AS BANK_DEPOSIT_MAX_5M,
+           COUNT(CASE WHEN f_bank_dep = 1 THEN 1     END)         AS BANK_DEPOSIT_CNT_5M,
 
     -- =========================================================================
-    -- 16. BALANCE  │  AVG, MAX, MIN × 1M/3M/6M  │  9 features
+    -- 16. BALANCE  │  AVG, MAX, MIN × 1M/3M/5M  │  9 features
     -- End-of-transaction balance snapshot per row
     -- =========================================================================
     COALESCE(AVG(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) THEN balance END), 0)   AS BALANCE_AVG_1M,
@@ -508,12 +509,12 @@ SELECT
     COALESCE(MAX(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) THEN balance END), 0)   AS BALANCE_MAX_3M,
     COALESCE(MIN(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) THEN balance END), 0)   AS BALANCE_MIN_3M,
 
-    COALESCE(AVG(balance), 0)   AS BALANCE_AVG_6M,
-    COALESCE(MAX(balance), 0)   AS BALANCE_MAX_6M,
-    COALESCE(MIN(balance), 0)   AS BALANCE_MIN_6M,
+    COALESCE(AVG(balance), 0)   AS BALANCE_AVG_5M,
+    COALESCE(MAX(balance), 0)   AS BALANCE_MAX_5M,
+    COALESCE(MIN(balance), 0)   AS BALANCE_MIN_5M,
 
     -- =========================================================================
-    -- 17. DERIVED FEATURES  │  4 metrics × 1M/3M/6M  │  12 features
+    -- 17. DERIVED FEATURES  │  4 metrics × 1M/3M/5M  │  12 features
     --
     --   NET_CASHFLOW      = total received − total sent (signed, can be negative)
     --   NET_CNT_SENDER    = P2P received transactions − P2P sent transactions
@@ -553,21 +554,33 @@ SELECT
     COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 3 MONTH) AND f_bank_dep = 1 THEN abs_amt END), 0)
                                                                                                      AS NET_BANKED_3M,
 
-    -- 6M
+    -- 5M
     COALESCE(SUM(CASE WHEN f_recv = 1 THEN abs_amt ELSE 0 END), 0)
       - COALESCE(SUM(CASE WHEN f_send = 1 THEN abs_amt ELSE 0 END), 0)
-                                                                                                     AS NET_CASHFLOW_6M,
+                                                                                                     AS NET_CASHFLOW_5M,
 
     COUNT(CASE WHEN f_p2p_recv = 1 THEN 1 END)
       - COUNT(CASE WHEN f_p2p_send = 1 THEN 1 END)
-                                                                                                     AS NET_CNT_SENDER_6M,
+                                                                                                     AS NET_CNT_SENDER_5M,
 
     COUNT(DISTINCT CASE WHEN f_p2p_recv = 1 THEN p2p_recv_cpty END)
       - COUNT(DISTINCT CASE WHEN f_p2p_send = 1 THEN p2p_send_cpty END)
-                                                                                                     AS NET_CNT_UNQ_SENDER_6M,
+                                                                                                     AS NET_CNT_UNQ_SENDER_5M,
 
     COALESCE(SUM(CASE WHEN f_bank_dep = 1 THEN abs_amt END), 0)
-                                                                                                     AS NET_BANKED_6M
+                                                                                                     AS NET_BANKED_5M,
+
+    -- =========================================================================
+    -- 18. DEFAULT_FLAG  │  1 feature
+    -- Derived from ALL_RECEIVED_MONEY_SUM_1M (total received in the most recent 1 month).
+    -- 1 = default  (sum < 5000)
+    -- 0 = payment  (sum >= 5000)
+    -- =========================================================================
+    CASE
+        WHEN COALESCE(SUM(CASE WHEN transaction_date >= DATE_SUB(ref_date, INTERVAL 1 MONTH) AND f_recv = 1 THEN abs_amt END), 0) < 5000
+        THEN 1
+        ELSE 0
+    END                                                                                              AS default_flag
 
 FROM flagged
 GROUP BY mobile_number;

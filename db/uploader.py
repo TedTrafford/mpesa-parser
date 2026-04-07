@@ -12,6 +12,7 @@ rows are preserved for duplicate and fraud identification.
 
 import json
 import os
+import re
 import sys
 import traceback
 from collections import namedtuple
@@ -180,14 +181,77 @@ def get_engine():
     return _engine
 
 
+_PROCEDURES_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "db", "procedures",
+)
+
+
+def _deploy_fly_profiling_procedure(conn) -> None:
+    """Read db/procedures/fly_profiling.sql and (re)create the stored procedure.
+
+    The DEFINER clause is stripped so the deploying DB user does not need
+    SUPER / SET_USER_ID privilege.  The DROP + CREATE pair is idempotent —
+    safe to call on every startup.  Edit fly_profiling.sql and restart the
+    app to pick up changes automatically.
+    """
+    sql_path = os.path.join(_PROCEDURES_DIR, "fly_profiling.sql")
+    if not os.path.exists(sql_path):
+        print("  DB: fly_profiling.sql not found — skipping procedure deployment")
+        return
+
+    with open(sql_path, "r", encoding="utf-8") as fh:
+        proc_sql = fh.read().strip()
+
+    # Strip DEFINER clause — MySQL rejects it unless the caller has
+    # SUPER or SET_USER_ID; the procedure will be owned by the session user.
+    proc_sql = re.sub(
+        r"DEFINER\s*=\s*`[^`]+`@`[^`]+`\s*",
+        "",
+        proc_sql,
+        flags=re.IGNORECASE,
+    )
+
+    conn.execute(text("DROP PROCEDURE IF EXISTS `fly_profiling`"))
+    conn.execute(text(proc_sql))
+    print("  DB: procedure `fly_profiling` deployed")
+
+
+def _migrate_normalize_mobile_numbers(conn) -> None:
+    """Normalize mobile_number values from local format (0xxx) to international
+    format (254xxx) in tbl_raw_mpesa_statements.
+
+    Runs only when un-normalised rows are present — subsequent calls are
+    no-ops.  This one-time migration aligns historical data with the
+    normalization applied by normalize_mobile_number() in config.py so that
+    fly_profiling() joins work correctly.
+    """
+    count = conn.execute(text(f"""
+        SELECT COUNT(*) FROM `{DB_TABLE}`
+        WHERE mobile_number LIKE '0%'
+    """)).scalar()
+
+    if count:
+        conn.execute(text(f"""
+            UPDATE `{DB_TABLE}`
+            SET    mobile_number = CONCAT('254', SUBSTRING(mobile_number, 2))
+            WHERE  mobile_number LIKE '0%'
+        """))
+        print(f"  DB: normalised {count} mobile number(s) in `{DB_TABLE}` (0xxx → 254xxx)")
+    else:
+        print(f"  DB: mobile numbers in `{DB_TABLE}` already normalised — no update needed")
+
+
 def ensure_table_exists():
     """Create tbl_raw_mpesa_statements if it does not already exist,
-    and run any pending schema migrations."""
+    and run any pending schema migrations including procedure deployment."""
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text(_CREATE_TABLE_SQL))
         _migrate_record_id(conn)
         _migrate_unique_key(conn)
+        _migrate_normalize_mobile_numbers(conn)
+        _deploy_fly_profiling_procedure(conn)
     print(f"  DB: table `{DB_TABLE}` is ready")
 
 
@@ -290,6 +354,7 @@ CREATE TABLE IF NOT EXISTS `{table}` (
     `end_time`         DATETIME         NOT NULL,
     `duration_seconds` DECIMAL(10, 2)   NOT NULL DEFAULT 0.00,
     `status`           VARCHAR(20)      NOT NULL DEFAULT '',
+    `profiling_status` VARCHAR(255)     NOT NULL DEFAULT '',
     `error`            TEXT             NOT NULL,
     PRIMARY KEY (`id`),
     INDEX `idx_log_record_id`  (`record_id`),
@@ -301,8 +366,29 @@ CREATE TABLE IF NOT EXISTS `{table}` (
 """.format(table=DB_LOGS_TABLE)
 
 
+def _migrate_profiling_status_column(conn) -> None:
+    """Add profiling_status column to tbl_file_processing_logs on existing tables.
+
+    Safe to call on every startup — no-op when the column already exists.
+    """
+    col_exists = conn.execute(text("""
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = :tbl
+          AND COLUMN_NAME  = 'profiling_status'
+    """), {"tbl": DB_LOGS_TABLE}).scalar()
+
+    if not col_exists:
+        conn.execute(text(f"""
+            ALTER TABLE `{DB_LOGS_TABLE}`
+                ADD COLUMN `profiling_status` VARCHAR(255) NOT NULL DEFAULT ''
+                    AFTER `status`
+        """))
+
+
 def _ensure_logs_table_exists(conn) -> None:
     conn.execute(text(_CREATE_LOGS_TABLE_SQL))
+    _migrate_profiling_status_column(conn)
 
 
 def insert_processing_log(entry: dict) -> None:
@@ -314,7 +400,7 @@ def insert_processing_log(entry: dict) -> None:
         filename, md5, manifest_hash, source, source_path, destination,
         record_id, rows_inserted, rows_skipped,
         start_timestamp, end_timestamp,   ← "%Y-%m-%d %H:%M:%S" strings
-        status, error
+        status, profiling_status, error
     """
     _fmt = "%Y-%m-%d %H:%M:%S"
 
@@ -337,20 +423,21 @@ def insert_processing_log(entry: dict) -> None:
             return 0
 
     row = {
-        "filename":         entry.get("filename",       ""),
-        "md5":              entry.get("md5",            ""),
-        "manifest_hash":    entry.get("manifest_hash",  ""),
-        "source":           entry.get("source",         ""),
-        "source_path":      entry.get("source_path",    ""),
-        "destination":      entry.get("destination",    ""),
-        "record_id":        entry.get("record_id",      ""),
-        "rows_inserted":    _int(entry.get("rows_inserted", 0)),
-        "rows_skipped":     _int(entry.get("rows_skipped",  0)),
-        "start_time":       start_dt,
-        "end_time":         end_dt,
-        "duration_seconds": round(duration, 2),
-        "status":           entry.get("status", ""),
-        "error":            entry.get("error",  "") or "",
+        "filename":          entry.get("filename",          ""),
+        "md5":               entry.get("md5",               ""),
+        "manifest_hash":     entry.get("manifest_hash",     ""),
+        "source":            entry.get("source",            ""),
+        "source_path":       entry.get("source_path",       ""),
+        "destination":       entry.get("destination",       ""),
+        "record_id":         entry.get("record_id",         ""),
+        "rows_inserted":     _int(entry.get("rows_inserted", 0)),
+        "rows_skipped":      _int(entry.get("rows_skipped",  0)),
+        "start_time":        start_dt,
+        "end_time":          end_dt,
+        "duration_seconds":  round(duration, 2),
+        "status":            entry.get("status",            ""),
+        "profiling_status":  entry.get("profiling_status",  ""),
+        "error":             entry.get("error",             "") or "",
     }
 
     try:
@@ -362,11 +449,13 @@ def insert_processing_log(entry: dict) -> None:
                     INSERT INTO `{DB_LOGS_TABLE}`
                         (filename, md5, manifest_hash, source, source_path,
                          destination, record_id, rows_inserted, rows_skipped,
-                         start_time, end_time, duration_seconds, status, error)
+                         start_time, end_time, duration_seconds,
+                         status, profiling_status, error)
                     VALUES
                         (:filename, :md5, :manifest_hash, :source, :source_path,
                          :destination, :record_id, :rows_inserted, :rows_skipped,
-                         :start_time, :end_time, :duration_seconds, :status, :error)
+                         :start_time, :end_time, :duration_seconds,
+                         :status, :profiling_status, :error)
                 """),
                 row,
             )

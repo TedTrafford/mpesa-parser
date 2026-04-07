@@ -42,6 +42,32 @@ DEFAULT_TRANSACTION_TYPE = "OTHER"
 # Date format for parsing timestamps
 DATE_FORMAT = "%Y-%m-%d"
 
+# ---------------------------------------------------------------------------
+# Mobile number normalisation
+# ---------------------------------------------------------------------------
+# ISO 3166-1 numeric country code prepended after stripping the local trunk
+# prefix ('0').  Override with the MOBILE_COUNTRY_CODE environment variable
+# when deploying outside Kenya.
+MOBILE_COUNTRY_CODE = os.environ.get("MOBILE_COUNTRY_CODE", "254")
+
+
+def normalize_mobile_number(number: str) -> str:
+    """Return *number* in international format using MOBILE_COUNTRY_CODE.
+
+    Handles the three forms seen in practice:
+        '0722123456'       ->  '254722123456'   (local with trunk prefix)
+        '+254722123456'    ->  '254722123456'   (E.164 with '+')
+        '254722123456'     ->  '254722123456'   (already normalised — no-op)
+        '722123456'        ->  '722123456'      (no recognised prefix — unchanged)
+    """
+    number = number.strip()
+    if number.startswith("+"):
+        number = number[1:]
+    elif number.startswith("0"):
+        number = MOBILE_COUNTRY_CODE + number[1:]
+    return number
+
+
 # Function to determine transaction type based on details
 def get_transaction_type(details):
     """Determine transaction type from details text."""

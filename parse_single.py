@@ -52,8 +52,8 @@ from dateutil.relativedelta import relativedelta
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-from config import FAILED_DIR, LOG_DIR, OUTPUT_DIR  # noqa: E402
-from db.uploader import insert_processing_log       # noqa: E402
+from config import FAILED_DIR, LOG_DIR, OUTPUT_DIR, normalize_mobile_number  # noqa: E402
+from db.uploader import get_engine, insert_processing_log  # noqa: E402
 
 # ── queue / lock paths ────────────────────────────────────────────────────────
 _QUEUE_ROOT   = os.path.join(ROOT, "queue")
@@ -97,25 +97,27 @@ def _write_log(entry: dict) -> None:
     except ValueError:
         duration = "N/A"
 
-    rows_inserted = entry.get("rows_inserted", "")
-    rows_skipped  = entry.get("rows_skipped",  "")
-    manifest_hash = entry.get("manifest_hash", "")
+    rows_inserted    = entry.get("rows_inserted",    "")
+    rows_skipped     = entry.get("rows_skipped",     "")
+    manifest_hash    = entry.get("manifest_hash",    "")
+    profiling_status = entry.get("profiling_status", "")
 
     new_block = (
-        f"filename      : {entry['filename']}\n"
-        f"md5           : {entry['md5']}\n"
-        f"manifest_hash : {manifest_hash}\n"
-        f"source        : parse_single.py\n"
-        f"source_path   : {entry['source_path']}\n"
-        f"destination   : {entry['destination']}\n"
-        f"record_id     : {entry['record_id']}\n"
-        f"rows_inserted : {rows_inserted}\n"
-        f"rows_skipped  : {rows_skipped}\n"
-        f"start         : {entry['start_timestamp']}\n"
-        f"end           : {entry['end_timestamp']}\n"
-        f"duration      : {duration}\n"
-        f"status        : {entry['status']}\n"
-        f"error         : {entry['error']}"
+        f"filename         : {entry['filename']}\n"
+        f"md5              : {entry['md5']}\n"
+        f"manifest_hash    : {manifest_hash}\n"
+        f"source           : parse_single.py\n"
+        f"source_path      : {entry['source_path']}\n"
+        f"destination      : {entry['destination']}\n"
+        f"record_id        : {entry['record_id']}\n"
+        f"rows_inserted    : {rows_inserted}\n"
+        f"rows_skipped     : {rows_skipped}\n"
+        f"start            : {entry['start_timestamp']}\n"
+        f"end              : {entry['end_timestamp']}\n"
+        f"duration         : {duration}\n"
+        f"status           : {entry['status']}\n"
+        f"profiling_status : {profiling_status}\n"
+        f"error            : {entry['error']}"
     )
 
     cutoff = datetime.now() - relativedelta(years=_RETENTION_YEARS)
@@ -200,6 +202,41 @@ def _update_job_file(job_file: str, **fields) -> dict:
     return job
 
 
+def call_fly_profiling(mobile_number: str) -> str:
+    """Execute CALL fly_profiling('<mobile_number>') against the configured DB.
+
+    The procedure is deployed automatically at startup via the migration in
+    db/uploader.ensure_table_exists().
+
+    Returns a short status string that callers can record in logs:
+        "OK"              — procedure completed successfully
+        "FAILED: <msg>"   — procedure raised an exception
+        "SKIPPED"         — mobile_number was empty
+    Errors are never re-raised — a profiling failure must not fail the parse job.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    if not mobile_number:
+        print("[profiling] skipped — mobile number is empty", file=sys.stderr)
+        return "SKIPPED"
+
+    mobile_number = normalize_mobile_number(mobile_number)
+
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            conn.execute(text("CALL fly_profiling(:phone)"), {"phone": mobile_number})
+        print(f"[profiling] fly_profiling('{mobile_number}') completed")
+        return "OK"
+    except Exception as exc:
+        msg = str(exc)[:200].replace("\n", " ")
+        print(
+            f"[profiling] WARNING: fly_profiling('{mobile_number}') failed: {exc}",
+            file=sys.stderr,
+        )
+        return f"FAILED: {msg}"
+
+
 def _process_job(job: dict) -> tuple:
     """Execute a single queued job.
 
@@ -236,6 +273,10 @@ def _process_job(job: dict) -> tuple:
         rows_skipped  = upload.skipped       if upload else ""
         manifest_hash = upload.manifest_hash if upload else ""
 
+        mobile_number = ""
+        if success and len(result) > 0 and "Mobile Number" in result.columns:
+            mobile_number = str(result["Mobile Number"].iloc[0]).strip()
+
         if not success:
             status = "FAILED"
             error  = "process_single_file returned None"
@@ -249,23 +290,29 @@ def _process_job(job: dict) -> tuple:
             status = "SUCCESS"
             error  = ""
 
+        # Run profiling for every successful parse (SUCCESS or SKIPPED)
+        # and capture the outcome for logging.
+        profiling_status = call_fly_profiling(mobile_number) if success else "N/A"
+
         log_entry = {
-            "filename":        file_name,
-            "md5":             file_md5,
-            "manifest_hash":   manifest_hash,
-            "source":          "parse_single.py",
-            "source_path":     os.path.abspath(pdf_path),
-            "destination":     os.path.abspath(output_csv),
-            "record_id":       record_id,
-            "rows_inserted":   rows_inserted,
-            "rows_skipped":    rows_skipped,
-            "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "status":          status,
-            "error":           error,
+            "filename":          file_name,
+            "md5":               file_md5,
+            "manifest_hash":     manifest_hash,
+            "source":            "parse_single.py",
+            "source_path":       os.path.abspath(pdf_path),
+            "destination":       os.path.abspath(output_csv),
+            "record_id":         record_id,
+            "rows_inserted":     rows_inserted,
+            "rows_skipped":      rows_skipped,
+            "start_timestamp":   start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp":     end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":            status,
+            "profiling_status":  profiling_status,
+            "error":             error,
         }
         _write_log(log_entry)
         insert_processing_log(log_entry)
+
         return success, error
 
     except Exception as exc:
@@ -273,19 +320,20 @@ def _process_job(job: dict) -> tuple:
         error_msg = str(exc)[:500].replace("\n", " ")
         print(f"[worker] ERROR  job_id={job['job_id']}: {exc}", file=sys.stderr)
         log_entry = {
-            "filename":        file_name,
-            "md5":             file_md5,
-            "manifest_hash":   "",
-            "source":          "parse_single.py",
-            "source_path":     os.path.abspath(pdf_path),
-            "destination":     os.path.abspath(output_csv),
-            "record_id":       record_id,
-            "rows_inserted":   "",
-            "rows_skipped":    "",
-            "start_timestamp": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_timestamp":   end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "status":          "FAILED",
-            "error":           error_msg,
+            "filename":          file_name,
+            "md5":               file_md5,
+            "manifest_hash":     "",
+            "source":            "parse_single.py",
+            "source_path":       os.path.abspath(pdf_path),
+            "destination":       os.path.abspath(output_csv),
+            "record_id":         record_id,
+            "rows_inserted":     "",
+            "rows_skipped":      "",
+            "start_timestamp":   start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp":     end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":            "FAILED",
+            "profiling_status":  "N/A",
+            "error":             error_msg,
         }
         _write_log(log_entry)
         insert_processing_log(log_entry)

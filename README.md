@@ -70,9 +70,11 @@ pip install -r requirements.txt
 ├── parser/
 │   └── mpesa_parser.py           # Core parser + process_single_file()
 ├── db/
-│   ├── schema.sql                # MySQL table DDL
-│   ├── uploader.py               # MySQL upload helper (INSERT IGNORE + UploadResult)
-│   └── features_207.sql          # 207-feature credit-scoring SQL query
+│   ├── schema.sql                # MySQL table DDL (reference / manual deployments)
+│   ├── uploader.py               # MySQL upload helper (INSERT IGNORE + UploadResult + migrations)
+│   ├── features_207.sql          # 207-feature credit-scoring SQL query
+│   └── procedures/
+│       └── fly_profiling.sql     # fly_profiling stored procedure (auto-deployed at startup)
 ├── config.py                     # Paths, DB credentials, regex patterns
 ├── parse_single.py               # Single-file queued parser (PHP integration)
 ├── process_all_pdfs.py           # Batch processor
@@ -170,6 +172,42 @@ python parser/mpesa_parser.py Mpesa_pdf_statement/288720.pdf output.csv 288720
 
 Every successful parse uploads the extracted transactions to MySQL table
 `tbl_raw_mpesa_statements`.
+
+### Automatic migrations
+
+`db/uploader.py` runs a lightweight migration check on every startup (inside
+`ensure_table_exists()`). Migrations are **idempotent** — safe to run
+repeatedly, they are no-ops when nothing has changed:
+
+| Migration | What it does |
+|-----------|--------------|
+| Table creation | Creates `tbl_raw_mpesa_statements` if it does not exist |
+| `record_id` column | Adds `record_id` + its index to pre-existing tables |
+| Unique key upgrade | Replaces the single-column `uq_receipt_no` key with a composite `uq_receipt_amount` key |
+| `fly_profiling` procedure | Drops and recreates the stored procedure from `db/procedures/fly_profiling.sql` |
+
+#### Editing the `fly_profiling` procedure
+
+Edit `db/procedures/fly_profiling.sql` directly in this repo, then restart the
+app. The migration will pick up the changes automatically — no manual MySQL
+Workbench runs required. The `DEFINER` clause is stripped at deploy time so the
+connecting DB user does not need `SUPER` or `SET_USER_ID` privilege.
+
+#### Invoking `fly_profiling` manually
+
+The procedure is no longer called automatically after every parse job. To run
+profiling for a specific subscriber from Python, call the helper directly:
+
+```python
+from parse_single import call_fly_profiling
+call_fly_profiling("0712345678")
+```
+
+Or execute it straight from a MySQL client:
+
+```sql
+CALL fly_profiling('0712345678');
+```
 
 ### Duplicate handling (INSERT IGNORE)
 
