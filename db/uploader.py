@@ -355,9 +355,11 @@ CREATE TABLE IF NOT EXISTS `{table}` (
     `duration_seconds` DECIMAL(10, 2)   NOT NULL DEFAULT 0.00,
     `status`            VARCHAR(20)      NOT NULL DEFAULT '',
     `profiling_status`  VARCHAR(255)     NOT NULL DEFAULT '',
-    `phone_match`       VARCHAR(10)      NOT NULL DEFAULT '',
-    `balance_check_pct` DECIMAL(5, 2)    DEFAULT NULL,
-    `error`             TEXT             NOT NULL,
+    `phone_match`            VARCHAR(10)      NOT NULL DEFAULT '',
+    `balance_check_pct`      DECIMAL(5, 2)    DEFAULT NULL,
+    `supplied_phone_number`  VARCHAR(20)      NOT NULL DEFAULT '',
+    `extracted_phone_number` VARCHAR(20)      NOT NULL DEFAULT '',
+    `error`                  TEXT             NOT NULL,
     PRIMARY KEY (`id`),
     INDEX `idx_log_record_id`  (`record_id`),
     INDEX `idx_log_status`     (`status`),
@@ -433,11 +435,57 @@ def _migrate_balance_check_pct_column(conn) -> None:
         """))
 
 
+def _migrate_supplied_phone_number_column(conn) -> None:
+    """Add supplied_phone_number column to tbl_file_processing_logs.
+
+    Stores the phone_number argument passed to parse_single.py (normalised to
+    international format).  Safe to call on every startup — no-op when the
+    column already exists.
+    """
+    col_exists = conn.execute(text("""
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = :tbl
+          AND COLUMN_NAME  = 'supplied_phone_number'
+    """), {"tbl": DB_LOGS_TABLE}).scalar()
+
+    if not col_exists:
+        conn.execute(text(f"""
+            ALTER TABLE `{DB_LOGS_TABLE}`
+                ADD COLUMN `supplied_phone_number` VARCHAR(20) NOT NULL DEFAULT ''
+                    AFTER `balance_check_pct`
+        """))
+
+
+def _migrate_extracted_phone_number_column(conn) -> None:
+    """Add extracted_phone_number column to tbl_file_processing_logs.
+
+    Stores the mobile number extracted from the PDF statement (normalised to
+    international format).  Safe to call on every startup — no-op when the
+    column already exists.
+    """
+    col_exists = conn.execute(text("""
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = :tbl
+          AND COLUMN_NAME  = 'extracted_phone_number'
+    """), {"tbl": DB_LOGS_TABLE}).scalar()
+
+    if not col_exists:
+        conn.execute(text(f"""
+            ALTER TABLE `{DB_LOGS_TABLE}`
+                ADD COLUMN `extracted_phone_number` VARCHAR(20) NOT NULL DEFAULT ''
+                    AFTER `supplied_phone_number`
+        """))
+
+
 def _ensure_logs_table_exists(conn) -> None:
     conn.execute(text(_CREATE_LOGS_TABLE_SQL))
     _migrate_profiling_status_column(conn)
     _migrate_phone_match_column(conn)
     _migrate_balance_check_pct_column(conn)
+    _migrate_supplied_phone_number_column(conn)
+    _migrate_extracted_phone_number_column(conn)
 
 
 def insert_processing_log(entry: dict) -> None:
@@ -449,7 +497,8 @@ def insert_processing_log(entry: dict) -> None:
         filename, md5, manifest_hash, source, source_path, destination,
         record_id, rows_inserted, rows_skipped,
         start_timestamp, end_timestamp,   ← "%Y-%m-%d %H:%M:%S" strings
-        status, profiling_status, phone_match, balance_check_pct, error
+        status, profiling_status, phone_match, balance_check_pct,
+        supplied_phone_number, extracted_phone_number, error
     """
     _fmt = "%Y-%m-%d %H:%M:%S"
 
@@ -486,9 +535,11 @@ def insert_processing_log(entry: dict) -> None:
         "duration_seconds":  round(duration, 2),
         "status":             entry.get("status",             ""),
         "profiling_status":  entry.get("profiling_status",  ""),
-        "phone_match":        entry.get("phone_match",        ""),
-        "balance_check_pct":  entry.get("balance_check_pct"),   # None → SQL NULL
-        "error":              entry.get("error",              "") or "",
+        "phone_match":             entry.get("phone_match",             ""),
+        "balance_check_pct":       entry.get("balance_check_pct"),        # None → SQL NULL
+        "supplied_phone_number":   entry.get("supplied_phone_number",     ""),
+        "extracted_phone_number":  entry.get("extracted_phone_number",    ""),
+        "error":                   entry.get("error",                     "") or "",
     }
 
     try:
@@ -501,12 +552,14 @@ def insert_processing_log(entry: dict) -> None:
                         (filename, md5, manifest_hash, source, source_path,
                          destination, record_id, rows_inserted, rows_skipped,
                          start_time, end_time, duration_seconds,
-                         status, profiling_status, phone_match, balance_check_pct, error)
+                         status, profiling_status, phone_match, balance_check_pct,
+                         supplied_phone_number, extracted_phone_number, error)
                     VALUES
                         (:filename, :md5, :manifest_hash, :source, :source_path,
                          :destination, :record_id, :rows_inserted, :rows_skipped,
                          :start_time, :end_time, :duration_seconds,
-                         :status, :profiling_status, :phone_match, :balance_check_pct, :error)
+                         :status, :profiling_status, :phone_match, :balance_check_pct,
+                         :supplied_phone_number, :extracted_phone_number, :error)
                 """),
                 row,
             )
