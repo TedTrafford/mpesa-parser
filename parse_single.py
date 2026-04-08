@@ -102,33 +102,37 @@ def _write_log(entry: dict) -> None:
     except ValueError:
         duration = "N/A"
 
-    rows_inserted     = entry.get("rows_inserted",     "")
-    rows_skipped      = entry.get("rows_skipped",      "")
-    manifest_hash     = entry.get("manifest_hash",     "")
-    profiling_status  = entry.get("profiling_status",  "")
-    phone_match       = entry.get("phone_match",       "")
-    balance_check_pct = entry.get("balance_check_pct", "")
+    rows_inserted            = entry.get("rows_inserted",            "")
+    rows_skipped             = entry.get("rows_skipped",             "")
+    manifest_hash            = entry.get("manifest_hash",            "")
+    profiling_status         = entry.get("profiling_status",         "")
+    phone_match              = entry.get("phone_match",              "")
+    balance_check_pct        = entry.get("balance_check_pct",        "")
+    supplied_phone_number    = entry.get("supplied_phone_number",    "")
+    extracted_phone_number   = entry.get("extracted_phone_number",   "")
     if balance_check_pct is not None and balance_check_pct != "":
         balance_check_pct = f"{balance_check_pct:.2f}%"
 
     new_block = (
-        f"filename          : {entry['filename']}\n"
-        f"md5               : {entry['md5']}\n"
-        f"manifest_hash     : {manifest_hash}\n"
-        f"source            : parse_single.py\n"
-        f"source_path       : {entry['source_path']}\n"
-        f"destination       : {entry['destination']}\n"
-        f"record_id         : {entry['record_id']}\n"
-        f"rows_inserted     : {rows_inserted}\n"
-        f"rows_skipped      : {rows_skipped}\n"
-        f"start             : {entry['start_timestamp']}\n"
-        f"end               : {entry['end_timestamp']}\n"
-        f"duration          : {duration}\n"
-        f"status            : {entry['status']}\n"
-        f"profiling_status  : {profiling_status}\n"
-        f"phone_match       : {phone_match}\n"
-        f"balance_check_pct : {balance_check_pct}\n"
-        f"error             : {entry['error']}"
+        f"filename                : {entry['filename']}\n"
+        f"md5                     : {entry['md5']}\n"
+        f"manifest_hash           : {manifest_hash}\n"
+        f"source                  : parse_single.py\n"
+        f"source_path             : {entry['source_path']}\n"
+        f"destination             : {entry['destination']}\n"
+        f"record_id               : {entry['record_id']}\n"
+        f"rows_inserted           : {rows_inserted}\n"
+        f"rows_skipped            : {rows_skipped}\n"
+        f"start                   : {entry['start_timestamp']}\n"
+        f"end                     : {entry['end_timestamp']}\n"
+        f"duration                : {duration}\n"
+        f"status                  : {entry['status']}\n"
+        f"profiling_status        : {profiling_status}\n"
+        f"supplied_phone_number   : {supplied_phone_number}\n"
+        f"extracted_phone_number  : {extracted_phone_number}\n"
+        f"phone_match             : {phone_match}\n"
+        f"balance_check_pct       : {balance_check_pct}\n"
+        f"error                   : {entry['error']}"
     )
 
     cutoff = datetime.now() - relativedelta(years=_RETENTION_YEARS)
@@ -389,22 +393,24 @@ def _process_job(job: dict) -> tuple:
         balance_check_pct = _check_balance_continuity(result if success else None)
 
         log_entry = {
-            "filename":           file_name,
-            "md5":                file_md5,
-            "manifest_hash":      manifest_hash,
-            "source":             "parse_single.py",
-            "source_path":        os.path.abspath(pdf_path),
-            "destination":        os.path.abspath(output_csv),
-            "record_id":          record_id,
-            "rows_inserted":      rows_inserted,
-            "rows_skipped":       rows_skipped,
-            "start_timestamp":    start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_timestamp":      end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "status":             status,
-            "profiling_status":   profiling_status,
-            "phone_match":        phone_match,
-            "balance_check_pct":  balance_check_pct,
-            "error":              error,
+            "filename":                file_name,
+            "md5":                     file_md5,
+            "manifest_hash":           manifest_hash,
+            "source":                  "parse_single.py",
+            "source_path":             os.path.abspath(pdf_path),
+            "destination":             os.path.abspath(output_csv),
+            "record_id":               record_id,
+            "rows_inserted":           rows_inserted,
+            "rows_skipped":            rows_skipped,
+            "start_timestamp":         start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp":           end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":                  status,
+            "profiling_status":        profiling_status,
+            "phone_match":             phone_match,
+            "balance_check_pct":       balance_check_pct,
+            "supplied_phone_number":   phone_number,
+            "extracted_phone_number":  mobile_number,
+            "error":                   error,
         }
         _write_log(log_entry)
         insert_processing_log(log_entry)
@@ -416,22 +422,24 @@ def _process_job(job: dict) -> tuple:
         error_msg = str(exc)[:500].replace("\n", " ")
         print(f"[worker] ERROR  job_id={job['job_id']}: {exc}", file=sys.stderr)
         log_entry = {
-            "filename":           file_name,
-            "md5":                file_md5,
-            "manifest_hash":      "",
-            "source":             "parse_single.py",
-            "source_path":        os.path.abspath(pdf_path),
-            "destination":        os.path.abspath(output_csv),
-            "record_id":          record_id,
-            "rows_inserted":      "",
-            "rows_skipped":       "",
-            "start_timestamp":    start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_timestamp":      end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "status":             "FAILED",
-            "profiling_status":   "N/A",
-            "phone_match":        "N/A",
-            "balance_check_pct":  None,
-            "error":              error_msg,
+            "filename":                file_name,
+            "md5":                     file_md5,
+            "manifest_hash":           "",
+            "source":                  "parse_single.py",
+            "source_path":             os.path.abspath(pdf_path),
+            "destination":             os.path.abspath(output_csv),
+            "record_id":               record_id,
+            "rows_inserted":           "",
+            "rows_skipped":            "",
+            "start_timestamp":         start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp":           end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":                  "FAILED",
+            "profiling_status":        "N/A",
+            "phone_match":             "N/A",
+            "balance_check_pct":       None,
+            "supplied_phone_number":   phone_number,
+            "extracted_phone_number":  "",
+            "error":                   error_msg,
         }
         _write_log(log_entry)
         insert_processing_log(log_entry)
