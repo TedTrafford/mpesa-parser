@@ -12,7 +12,7 @@ import json
 # Add parent directory to path to import config and db package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    INPUT_DIR, OUTPUT_DIR, FAILED_DIR,
+    INPUT_DIR, OUTPUT_DIR,
     TRANSACTION_PATTERN, get_transaction_type, DATE_FORMAT,
     normalize_mobile_number,
 )
