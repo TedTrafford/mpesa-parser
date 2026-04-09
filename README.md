@@ -18,7 +18,7 @@ pip install -r requirements.txt
 ./run_parser.sh
 
 # 4b. Parse a single PDF (queued, safe for concurrent callers)
-python parse_single.py <record_id> <file_name> <pdf_path> <pin>
+python parse_single.py <record_id> <file_name> <pdf_path> <pin> <phone_number>
 
 # 4c. Test DB connectivity (run on server to diagnose upload issues)
 python db_test.py
@@ -96,6 +96,7 @@ centralized in `config.py`. Override any value with environment variables:
 | `MPESA_DB_NAME` | `Data_Science` | Database name |
 | `MPESA_DB_USER` | `staging` | MySQL user |
 | `MPESA_DB_PASSWORD` | *(hardcoded fallback)* | MySQL password |
+| `MOBILE_COUNTRY_CODE` | `254` | Country dialling code prepended when normalising phone numbers (`0xxx` → `254xxx`). Change for non-Kenya deployments. |
 
 ## How to Use
 
@@ -115,7 +116,7 @@ application) that submits one statement at a time and may call the script
 concurrently.
 
 ```bash
-python parse_single.py <record_id> <file_name> <pdf_path> <pin>
+python parse_single.py <record_id> <file_name> <pdf_path> <pin> <phone_number>
 ```
 
 | Argument | Description |
@@ -124,16 +125,17 @@ python parse_single.py <record_id> <file_name> <pdf_path> <pin>
 | `file_name` | Original PDF filename (e.g. `310549.pdf`). The output CSV uses the same stem. |
 | `pdf_path` | Absolute path to the PDF file on disk. |
 | `pin` | PDF password used to decrypt the M-PESA statement. |
+| `phone_number` | Customer's mobile number in international format (e.g. `254722123456`). A leading `0` is auto-converted to `254`. Validated against the number extracted from the PDF — result stored as `phone_match` in the processing log. |
 
 **Examples:**
 
 ```bash
-# Minimal call — record_id ties this parse back to your application record
-python parse_single.py 12345 310549.pdf /var/uploads/310549.pdf 310549
+# Standard call — phone_number validated against the PDF
+python parse_single.py 12345 310549.pdf /var/uploads/310549.pdf 310549 254722123456
 
 # With a UUID record_id (typical Laravel usage)
 python parse_single.py 019cf6da-b7d9-73a6-bd7a-f0f8d52a66ba statement.pdf \
-    /var/www/app/storage/app/private/mpesa-statements/statement.pdf 123456
+    /var/www/app/storage/app/private/mpesa-statements/statement.pdf 123456 254759891910
 ```
 
 **Path handling:**
@@ -184,7 +186,11 @@ repeatedly, they are no-ops when nothing has changed:
 | Table creation | Creates `tbl_raw_mpesa_statements` if it does not exist |
 | `record_id` column | Adds `record_id` + its index to pre-existing tables |
 | Unique key upgrade | Replaces the single-column `uq_receipt_no` key with a composite `uq_receipt_amount` key |
+| Mobile number normalisation | One-time `UPDATE` converting all `0xxx` values in `mobile_number` to `254xxx` |
 | `fly_profiling` procedure | Drops and recreates the stored procedure from `db/procedures/fly_profiling.sql` |
+| `profiling_status` column | Adds `profiling_status` to `tbl_file_processing_logs` on existing tables |
+| `phone_match` column | Adds `phone_match` to `tbl_file_processing_logs` on existing tables |
+| `balance_check_pct` column | Adds `balance_check_pct` to `tbl_file_processing_logs` on existing tables |
 
 #### Editing the `fly_profiling` procedure
 
@@ -200,13 +206,13 @@ profiling for a specific subscriber from Python, call the helper directly:
 
 ```python
 from parse_single import call_fly_profiling
-call_fly_profiling("0712345678")
+call_fly_profiling("254722123456")
 ```
 
 Or execute it straight from a MySQL client:
 
 ```sql
-CALL fly_profiling('0712345678');
+CALL fly_profiling('254722123456');
 ```
 
 ### Duplicate handling (INSERT IGNORE)
@@ -255,6 +261,9 @@ One block per job, retained for 3 years. Fields:
 | `rows_skipped` | Number of rows silently ignored (receipt_no already exists) |
 | `start` / `end` / `duration` | Job timing |
 | `status` | `SUCCESS`, `SKIPPED`, or `FAILED` |
+| `profiling_status` | Result of the `fly_profiling` stored-procedure call: `OK`, `FAILED: <msg>`, `SKIPPED`, or `N/A` |
+| `phone_match` | `MATCH` — caller `phone_number` matches the mobile number in the PDF; `NO_MATCH` — mismatch; `N/A` — parse failed or no phone supplied |
+| `balance_check_pct` | Percentage of consecutive transaction pairs where `balance[i] == balance[i-1] + amount[i]` — a data-quality indicator (see note below) |
 | `error` | Empty on success; skip reason or exception message otherwise |
 
 **Status values:**
@@ -265,28 +274,52 @@ One block per job, retained for 3 years. Fields:
 | `SKIPPED` | PDF parsed successfully but all rows already exist — possible duplicate submission |
 | `FAILED` | Parsing or DB error — see `error` field and `db_errors.log` |
 
+**`phone_match` values:**
+
+| Value | Meaning |
+|---|---|
+| `MATCH` | The `phone_number` argument matches the mobile number extracted from the PDF |
+| `NO_MATCH` | They differ — possible wrong customer or data-entry error |
+| `N/A` | Parse failed, `phone_number` was empty, or PDF had no mobile number |
+
+**`balance_check_pct` explained:**
+
+Transactions are sorted by date + time. For each consecutive pair the formula
+`balance[i] == balance[i-1] + amount[i]` (±0.01 tolerance) is tested and the
+percentage of pairs that pass is recorded. M-PESA statements include two-sided
+entries (e.g. AGENT WITHDRAWAL records both the credit and debit legs as
+separate rows), so a score of 100 % is uncommon — this is a relative
+data-quality indicator. `NULL` means the parse failed or the file had fewer
+than 2 transactions.
+
 **Example — new upload:**
 ```
-filename      : abc123.pdf
-md5           : 5ad9815575d547baeab12e70031ac316
-manifest_hash : e3b0c44298fc1c149afb4c8996fb924
+filename          : abc123.pdf
+md5               : 5ad9815575d547baeab12e70031ac316
+manifest_hash     : e3b0c44298fc1c149afb4c8996fb924
 ...
-rows_inserted : 47
-rows_skipped  : 0
-status        : SUCCESS
-error         :
+rows_inserted     : 47
+rows_skipped      : 0
+status            : SUCCESS
+profiling_status  : OK
+phone_match       : MATCH
+balance_check_pct : 72.34%
+error             :
 ```
 
 **Example — duplicate submission:**
 ```
-filename      : abc123.pdf
-md5           : 5ad9815575d547baeab12e70031ac316
-manifest_hash : e3b0c44298fc1c149afb4c8996fb924
+filename          : abc123.pdf
+md5               : 5ad9815575d547baeab12e70031ac316
+manifest_hash     : e3b0c44298fc1c149afb4c8996fb924
 ...
-rows_inserted : 0
-rows_skipped  : 47
-status        : SKIPPED
-error         : 47 row(s) already exist in the database (receipt_no conflict — possible duplicate submission)
+rows_inserted     : 0
+rows_skipped      : 47
+status            : SKIPPED
+profiling_status  : OK
+phone_match       : MATCH
+balance_check_pct : 72.34%
+error             : 47 row(s) already exist in the database (receipt_no conflict — possible duplicate submission)
 ```
 
 ### `logs/db_errors.log`
@@ -308,7 +341,7 @@ Each parsed statement produces **14 columns** (CSV and database table):
 |--------|-----------|-------------|---------|
 | Record ID | `record_id` | Caller-supplied unique identifier | `019cf6da-b7d9-73a6-bd7a-f0f8d52a66ba` |
 | Customer Name | `customer_name` | Account holder name | Monica Atieno Ondoo |
-| Mobile Number | `mobile_number` | M-PESA number | 0112850906 |
+| Mobile Number | `mobile_number` | M-PESA number in international format | 254112850906 |
 | Email Address | `email_address` | Email on account | info@aleza.co.ke |
 | Statement Period | `statement_period` | Date range | 14 Aug 2024 - 14 Feb 2025 |
 | Request Date | `request_date` | Statement generated | 14 Feb 2025 |
@@ -400,7 +433,17 @@ of the stored path only, not from a path that already contains the base.
 leading `/` if the received path is not absolute, preventing `os.path.abspath()`
 from prepending the process CWD and doubling the path.
 
-### 6. Processing stops during batch run
+### 6. `phone_match: NO_MATCH` in the processing log
+
+The `phone_number` argument passed to `parse_single.py` does not match the
+mobile number extracted from the PDF statement.  Check that:
+
+1. The correct PDF was submitted for the given customer record.
+2. The `phone_number` was passed in international format (`254xxx`). A leading
+   `0` is auto-converted, but any other prefix is not.
+3. The PDF itself belongs to the expected account holder.
+
+### 7. Processing stops during batch run
 Re-run the script — already processed files have been moved:
 ```bash
 ./run_parser.sh

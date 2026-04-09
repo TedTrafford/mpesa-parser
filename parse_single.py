@@ -13,21 +13,26 @@ will pick up the new job automatically in the same drain loop.
 
 Usage
 -----
-    python parse_single.py <record_id> <file_name> <pdf_path> <pin>
+    python parse_single.py <record_id> <file_name> <pdf_path> <pin> <phone_number>
 
 Arguments
 ---------
-    record_id   Caller-supplied unique identifier for this parse request.
-                Stored as ``record_id`` inside the ``metadata`` JSON column
-                of every transaction row produced by the parse.
+    record_id    Caller-supplied unique identifier for this parse request.
+                 Stored as ``record_id`` inside the ``metadata`` JSON column
+                 of every transaction row produced by the parse.
 
-    file_name   Original PDF filename (e.g. ``310549.pdf``).  Used to derive
-                the output CSV name — the ``.pdf`` extension is swapped for
-                ``.csv`` and the file is written to OUTPUT_DIR.
+    file_name    Original PDF filename (e.g. ``310549.pdf``).  Used to derive
+                 the output CSV name — the ``.pdf`` extension is swapped for
+                 ``.csv`` and the file is written to OUTPUT_DIR.
 
-    pdf_path    Absolute or relative path to the PDF file to parse.
+    pdf_path     Absolute or relative path to the PDF file to parse.
 
-    pin         PDF password used to decrypt the M-PESA statement.
+    pin          PDF password used to decrypt the M-PESA statement.
+
+    phone_number The customer's mobile number in international format
+                 (e.g. ``254722123456``).  Validated against the mobile number
+                 extracted from the PDF; the result is recorded as
+                 ``phone_match`` (MATCH / NO_MATCH) in the processing log.
 
 Exit codes
 ----------
@@ -97,27 +102,37 @@ def _write_log(entry: dict) -> None:
     except ValueError:
         duration = "N/A"
 
-    rows_inserted    = entry.get("rows_inserted",    "")
-    rows_skipped     = entry.get("rows_skipped",     "")
-    manifest_hash    = entry.get("manifest_hash",    "")
-    profiling_status = entry.get("profiling_status", "")
+    rows_inserted            = entry.get("rows_inserted",            "")
+    rows_skipped             = entry.get("rows_skipped",             "")
+    manifest_hash            = entry.get("manifest_hash",            "")
+    profiling_status         = entry.get("profiling_status",         "")
+    phone_match              = entry.get("phone_match",              "")
+    balance_check_pct        = entry.get("balance_check_pct",        "")
+    supplied_phone_number    = entry.get("supplied_phone_number",    "")
+    extracted_phone_number   = entry.get("extracted_phone_number",   "")
+    if balance_check_pct is not None and balance_check_pct != "":
+        balance_check_pct = f"{balance_check_pct:.2f}%"
 
     new_block = (
-        f"filename         : {entry['filename']}\n"
-        f"md5              : {entry['md5']}\n"
-        f"manifest_hash    : {manifest_hash}\n"
-        f"source           : parse_single.py\n"
-        f"source_path      : {entry['source_path']}\n"
-        f"destination      : {entry['destination']}\n"
-        f"record_id        : {entry['record_id']}\n"
-        f"rows_inserted    : {rows_inserted}\n"
-        f"rows_skipped     : {rows_skipped}\n"
-        f"start            : {entry['start_timestamp']}\n"
-        f"end              : {entry['end_timestamp']}\n"
-        f"duration         : {duration}\n"
-        f"status           : {entry['status']}\n"
-        f"profiling_status : {profiling_status}\n"
-        f"error            : {entry['error']}"
+        f"filename                : {entry['filename']}\n"
+        f"md5                     : {entry['md5']}\n"
+        f"manifest_hash           : {manifest_hash}\n"
+        f"source                  : parse_single.py\n"
+        f"source_path             : {entry['source_path']}\n"
+        f"destination             : {entry['destination']}\n"
+        f"record_id               : {entry['record_id']}\n"
+        f"rows_inserted           : {rows_inserted}\n"
+        f"rows_skipped            : {rows_skipped}\n"
+        f"start                   : {entry['start_timestamp']}\n"
+        f"end                     : {entry['end_timestamp']}\n"
+        f"duration                : {duration}\n"
+        f"status                  : {entry['status']}\n"
+        f"profiling_status        : {profiling_status}\n"
+        f"supplied_phone_number   : {supplied_phone_number}\n"
+        f"extracted_phone_number  : {extracted_phone_number}\n"
+        f"phone_match             : {phone_match}\n"
+        f"balance_check_pct       : {balance_check_pct}\n"
+        f"error                   : {entry['error']}"
     )
 
     cutoff = datetime.now() - relativedelta(years=_RETENTION_YEARS)
@@ -154,7 +169,9 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _enqueue(record_id: str, file_name: str, pdf_path: str, pin: str) -> str:
+def _enqueue(
+    record_id: str, file_name: str, pdf_path: str, pin: str, phone_number: str
+) -> str:
     """
     Write a job descriptor to the pending queue and return the job_id.
 
@@ -165,16 +182,17 @@ def _enqueue(record_id: str, file_name: str, pdf_path: str, pin: str) -> str:
 
     job_id = str(uuid.uuid4())
     job = {
-        "job_id":               job_id,
-        "record_id":            record_id,
-        "file_name":            file_name,
-        "pdf_path":             pdf_path,
-        "pin":                  pin,
-        "status":               "queued",
-        "queued_at":            _utc_now(),
+        "job_id":                job_id,
+        "record_id":             record_id,
+        "file_name":             file_name,
+        "pdf_path":              pdf_path,
+        "pin":                   pin,
+        "phone_number":          normalize_mobile_number(phone_number.strip()),
+        "status":                "queued",
+        "queued_at":             _utc_now(),
         "processing_started_at": None,
-        "completed_at":         None,
-        "error":                None,
+        "completed_at":          None,
+        "error":                 None,
     }
 
     dest = os.path.join(_PENDING_DIR, f"{job_id}.json")
@@ -237,6 +255,79 @@ def call_fly_profiling(mobile_number: str) -> str:
         return f"FAILED: {msg}"
 
 
+def _validate_phone_number(phone_number: str, df) -> str:
+    """Compare caller-supplied phone_number with the mobile number in the parsed DataFrame.
+
+    Both sides are passed through normalize_mobile_number() before comparison
+    so that minor formatting differences (leading 0, leading +) don't cause
+    false NO_MATCH results.
+
+    Returns
+    -------
+    "MATCH"    caller number == extracted number
+    "NO_MATCH" caller number != extracted number
+    "N/A"      phone_number was not provided, or the DataFrame is empty / has
+               no Mobile Number column
+    """
+    if not phone_number:
+        return "N/A"
+    if df is None or len(df) == 0 or "Mobile Number" not in df.columns:
+        return "N/A"
+
+    caller    = normalize_mobile_number(phone_number.strip())
+    extracted = normalize_mobile_number(str(df["Mobile Number"].iloc[0]).strip())
+    return "MATCH" if caller == extracted else "NO_MATCH"
+
+
+def _check_balance_continuity(df) -> float | None:
+    """Validate the running balance across all transactions in *df*.
+
+    Sorts rows by transaction date + time, then for each consecutive pair
+    checks whether:
+
+        balance[i]  ==  balance[i-1] + amount[i]          (± 0.01 tolerance)
+
+    Returns the percentage of consecutive pairs that satisfy the formula
+    (0.0 – 100.0), or None when the DataFrame has fewer than 2 rows.
+
+    Note: M-PESA statements pair some transactions as two rows with the same
+    receipt number (e.g. AGENT WITHDRAWAL shows a credit and a debit side).
+    These pairs will rarely satisfy the sequential formula, so a 100 % score
+    is not expected.  The percentage is a data-quality indicator.
+    """
+    import pandas as pd  # noqa: PLC0415
+
+    if df is None or len(df) < 2:
+        return None
+
+    df_sorted = (
+        df.assign(
+            _dt=pd.to_datetime(
+                df["Date"].astype(str) + " " + df["Time"].astype(str),
+                errors="coerce",
+            )
+        )
+        .sort_values("_dt")
+        .drop(columns=["_dt"])
+        .reset_index(drop=True)
+    )
+
+    matches = 0
+    total   = len(df_sorted) - 1
+
+    for i in range(1, len(df_sorted)):
+        try:
+            prev_bal = float(df_sorted.loc[i - 1, "Balance"])
+            amount   = float(df_sorted.loc[i,     "Amount"])
+            curr_bal = float(df_sorted.loc[i,     "Balance"])
+            if abs((prev_bal + amount) - curr_bal) < 0.01:
+                matches += 1
+        except (TypeError, ValueError):
+            pass
+
+    return round(matches / total * 100, 2) if total > 0 else 100.0
+
+
 def _process_job(job: dict) -> tuple:
     """Execute a single queued job.
 
@@ -247,10 +338,11 @@ def _process_job(job: dict) -> tuple:
     """
     from parser.mpesa_parser import process_single_file  # noqa: PLC0415
 
-    record_id  = job["record_id"]
-    pdf_path   = job["pdf_path"]
-    file_name  = job["file_name"]
-    pin        = job["pin"]
+    record_id    = job["record_id"]
+    pdf_path     = job["pdf_path"]
+    file_name    = job["file_name"]
+    pin          = job["pin"]
+    phone_number = job.get("phone_number", "")
 
     base = os.path.splitext(file_name)[0]
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -294,21 +386,31 @@ def _process_job(job: dict) -> tuple:
         # and capture the outcome for logging.
         profiling_status = call_fly_profiling(mobile_number) if success else "N/A"
 
+        # Validation 1 — caller-supplied phone vs extracted mobile number
+        phone_match = _validate_phone_number(phone_number, result if success else None)
+
+        # Validation 2 — balance continuity across ordered transactions
+        balance_check_pct = _check_balance_continuity(result if success else None)
+
         log_entry = {
-            "filename":          file_name,
-            "md5":               file_md5,
-            "manifest_hash":     manifest_hash,
-            "source":            "parse_single.py",
-            "source_path":       os.path.abspath(pdf_path),
-            "destination":       os.path.abspath(output_csv),
-            "record_id":         record_id,
-            "rows_inserted":     rows_inserted,
-            "rows_skipped":      rows_skipped,
-            "start_timestamp":   start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_timestamp":     end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "status":            status,
-            "profiling_status":  profiling_status,
-            "error":             error,
+            "filename":                file_name,
+            "md5":                     file_md5,
+            "manifest_hash":           manifest_hash,
+            "source":                  "parse_single.py",
+            "source_path":             os.path.abspath(pdf_path),
+            "destination":             os.path.abspath(output_csv),
+            "record_id":               record_id,
+            "rows_inserted":           rows_inserted,
+            "rows_skipped":            rows_skipped,
+            "start_timestamp":         start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp":           end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":                  status,
+            "profiling_status":        profiling_status,
+            "phone_match":             phone_match,
+            "balance_check_pct":       balance_check_pct,
+            "supplied_phone_number":   phone_number,
+            "extracted_phone_number":  mobile_number,
+            "error":                   error,
         }
         _write_log(log_entry)
         insert_processing_log(log_entry)
@@ -320,20 +422,24 @@ def _process_job(job: dict) -> tuple:
         error_msg = str(exc)[:500].replace("\n", " ")
         print(f"[worker] ERROR  job_id={job['job_id']}: {exc}", file=sys.stderr)
         log_entry = {
-            "filename":          file_name,
-            "md5":               file_md5,
-            "manifest_hash":     "",
-            "source":            "parse_single.py",
-            "source_path":       os.path.abspath(pdf_path),
-            "destination":       os.path.abspath(output_csv),
-            "record_id":         record_id,
-            "rows_inserted":     "",
-            "rows_skipped":      "",
-            "start_timestamp":   start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "end_timestamp":     end_ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "status":            "FAILED",
-            "profiling_status":  "N/A",
-            "error":             error_msg,
+            "filename":                file_name,
+            "md5":                     file_md5,
+            "manifest_hash":           "",
+            "source":                  "parse_single.py",
+            "source_path":             os.path.abspath(pdf_path),
+            "destination":             os.path.abspath(output_csv),
+            "record_id":               record_id,
+            "rows_inserted":           "",
+            "rows_skipped":            "",
+            "start_timestamp":         start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_timestamp":           end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":                  "FAILED",
+            "profiling_status":        "N/A",
+            "phone_match":             "N/A",
+            "balance_check_pct":       None,
+            "supplied_phone_number":   phone_number,
+            "extracted_phone_number":  "",
+            "error":                   error_msg,
         }
         _write_log(log_entry)
         insert_processing_log(log_entry)
@@ -414,11 +520,22 @@ def _run_worker() -> None:
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    if len(sys.argv) != 5:
+    if len(sys.argv) != 6:
         print(__doc__)
         sys.exit(1)
 
-    _, record_id, file_name, pdf_path, pin = sys.argv
+    _, record_id, file_name, pdf_path, pin, phone_number = sys.argv
+
+    # Normalize and validate the phone number up-front so the caller gets
+    # an immediate error rather than a silent NO_MATCH in the log.
+    phone_number = normalize_mobile_number(phone_number.strip())
+    if not phone_number.startswith("254"):
+        print(
+            f"Error: phone_number must be in international format starting with 254 "
+            f"(got '{phone_number}' after normalisation).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Guard against callers that strip the leading slash from an absolute path.
     # os.path.abspath() would otherwise prepend CWD and produce a doubled path
@@ -430,7 +547,7 @@ def main() -> None:
         print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
         sys.exit(1)
 
-    _enqueue(record_id, file_name, pdf_path, pin)
+    _enqueue(record_id, file_name, pdf_path, pin, phone_number)
     _run_worker()
 
 
