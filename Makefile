@@ -3,7 +3,7 @@
 
 .PHONY: help install install-dev test test-cov lint check clean hooks
 
-PYTHON   ?= $(shell which python || which python3)
+PYTHON   ?= $(shell which python3)
 PIP      ?= $(PYTHON) -m pip
 PYTEST   ?= $(PYTHON) -m pytest
 FLAKE8   ?= $(PYTHON) -m flake8

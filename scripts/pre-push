@@ -22,13 +22,13 @@ echo "========================================="
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# Use the venv python if available, then active conda/system python, then python3
+# Use the venv python if available, then active conda python, then system python3
 if [ -f "$REPO_ROOT/.venv/bin/python" ]; then
     PYTHON="$REPO_ROOT/.venv/bin/python"
 elif [ -f "$REPO_ROOT/venv/bin/python" ]; then
     PYTHON="$REPO_ROOT/venv/bin/python"
 else
-    PYTHON="$(which python 2>/dev/null || which python3)"
+    PYTHON="$(which python3)"
 fi
 
 # ── 1. lint ───────────────────────────────────────────────────────────────────
