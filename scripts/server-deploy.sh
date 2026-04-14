@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# scripts/server-deploy.sh
+# ---------------------------------------------------------------------------
+# Server-side deploy script -- called by the GitHub Actions deploy workflow
+# whenever a commit lands on main.
+#
+# Assumptions:
+#   - The repo is cloned at /var/www/server/parser (parse_single.py is at
+#     /var/www/server/parser/parse_single.py).
+#   - A virtualenv exists at /var/www/server/parser/.venv
+#   - The .env file with real credentials lives at /var/www/server/parser/.env
+#     and is NOT tracked by git.
+# ---------------------------------------------------------------------------
+
+set -euo pipefail
+
+DEPLOY_PATH="/var/www/server/parser"
+
+echo ""
+echo "=================================================="
+echo "  Deploy started -- $(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo "  Path: $DEPLOY_PATH"
+echo "=================================================="
+
+cd "$DEPLOY_PATH"
+
+# -- 1. Pull latest code from main -------------------------------------------
+echo ""
+echo "[1/3] Pulling latest code..."
+git fetch --prune origin
+git checkout main
+git reset --hard origin/main
+echo "  HEAD is now at: $(git rev-parse --short HEAD) -- $(git log -1 --pretty=%s)"
+
+# -- 2. Activate virtualenv and sync dependencies ----------------------------
+echo ""
+echo "[2/3] Syncing Python dependencies..."
+
+if [ -f "$DEPLOY_PATH/.venv/bin/activate" ]; then
+    VENV_ACTIVATE="$DEPLOY_PATH/.venv/bin/activate"
+elif [ -f "$DEPLOY_PATH/venv/bin/activate" ]; then
+    VENV_ACTIVATE="$DEPLOY_PATH/venv/bin/activate"
+else
+    echo "  ERROR: no virtualenv found at $DEPLOY_PATH/.venv or $DEPLOY_PATH/venv"
+    echo "  Run the initial-setup instructions to create one."
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$VENV_ACTIVATE"
+pip install --quiet --upgrade pip
+pip install --quiet -r requirements.txt
+echo "  Dependencies up to date."
+
+# -- 3. Optional: restart a long-running systemd service ---------------------
+# Uncomment if you run parse_single.py as a persistent service named "mpesa-parser":
+#
+# echo ""
+# echo "[3/3] Restarting service..."
+# sudo systemctl restart mpesa-parser
+# sudo systemctl status  mpesa-parser --no-pager
+
+echo ""
+echo "[3/3] No persistent service to restart (on-demand processing model)."
+
+echo ""
+echo "=================================================="
+echo "  Deploy complete -- $(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo "=================================================="

@@ -66,7 +66,8 @@ pip install -r requirements.txt
 .
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                # GitHub Actions CI (lint + tests on every push/PR)
+│       ├── ci.yml                # GitHub Actions CI (lint + tests on every push/PR)
+│       └── deploy.yml            # GitHub Actions CD (auto-deploy to server on merge to main)
 ├── Mpesa_pdf_statement/          # Input: Place PDF files here
 ├── Mpesa_csv_Statement_Parsed/   # Output: Successful CSVs
 ├── Mpesa_csv_Statement_Failed/   # Failed: PDFs that couldn't be parsed
@@ -88,7 +89,8 @@ pip install -r requirements.txt
 │   └── procedures/
 │       └── fly_profiling.sql     # fly_profiling stored procedure (auto-deployed at startup)
 ├── scripts/
-│   └── pre-push                  # Git pre-push hook source (install with: make hooks)
+│   ├── pre-push                  # Git pre-push hook source (install with: make hooks)
+│   └── server-deploy.sh          # Server-side deploy script (called by deploy.yml via SSH)
 ├── tests/
 │   ├── test_config.py            # Tests for normalisation helpers and transaction-type mapping
 │   ├── test_parser.py            # Tests for PDF parsing logic
@@ -516,6 +518,66 @@ Re-run the script — already processed files have been moved:
 ```bash
 ./run_parser.sh
 ```
+
+## Deployment
+
+The project uses GitHub Actions to automatically deploy to the production server (`139.84.243.180`) whenever a branch is merged into `main`.
+
+### How it works
+
+1. A PR is merged into `main`.
+2. The **Deploy to Production** workflow (`.github/workflows/deploy.yml`) is triggered.
+3. GitHub Actions SSHs into the server and runs `scripts/server-deploy.sh`.
+4. The script pulls the latest code from `main`, activates the virtualenv, and syncs Python dependencies.
+
+The repo on the server lives at `/var/www/server/parser/` — so `parse_single.py` is at `/var/www/server/parser/parse_single.py`.
+
+### One-time server setup
+
+```bash
+# 1. Clone the repo
+git clone git@github.com:<ORG>/<REPO>.git /var/www/server/parser
+
+# 2. Create and populate the virtualenv
+cd /var/www/server/parser
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Create the .env file with real DB credentials (never commit this)
+cp .env.example .env
+# edit .env with production values
+```
+
+### SSH key setup
+
+```bash
+# On your local machine — generate a dedicated deploy key pair
+ssh-keygen -t ed25519 -C "github-deploy@mpesa-parser" -f ~/.ssh/mpesa_deploy -N ""
+
+# Authorize the public key on the server
+ssh-copy-id -i ~/.ssh/mpesa_deploy.pub <USER>@139.84.243.180
+```
+
+### GitHub Secrets
+
+Go to **GitHub repo → Settings → Secrets and variables → Actions** and add:
+
+| Secret | Value |
+|---|---|
+| `SSH_HOST` | `139.84.243.180` |
+| `SSH_USER` | Server username (e.g. `ubuntu`) |
+| `SSH_PRIVATE_KEY` | Contents of `~/.ssh/mpesa_deploy` (the private key) |
+
+### Branch protection (recommended)
+
+In **Settings → Branches → Add branch protection rule** for `main`, enable:
+
+- **Require status checks to pass before merging** — select the `CI / Lint & Test` checks.
+
+This ensures the deploy workflow only runs on commits that have already passed lint and tests.
+
+---
 
 ## Customization
 
