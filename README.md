@@ -9,18 +9,24 @@ This tool parses M-PESA PDF statements and extracts transaction data into CSV fi
 conda create -n mpesa_parser python=3.9 -y
 conda activate mpesa_parser
 
-# 2. Install dependencies
-pip install -r requirements.txt
+# 2. Install runtime + dev/test dependencies
+pip install -r requirements-dev.txt
 
-# 3. Place your PDF files in Mpesa_pdf_statement/
+# 3. Install the pre-push git hook (one-time per machine)
+make hooks
 
-# 4a. Batch-process all PDFs
+# 4. Verify everything is working before your first push
+make check
+
+# 5. Place your PDF files in Mpesa_pdf_statement/
+
+# 6a. Batch-process all PDFs
 ./run_parser.sh
 
-# 4b. Parse a single PDF (queued, safe for concurrent callers)
+# 6b. Parse a single PDF (queued, safe for concurrent callers)
 python parse_single.py <record_id> <file_name> <pdf_path> <pin> <phone_number>
 
-# 4c. Test DB connectivity (run on server to diagnose upload issues)
+# 6c. Test DB connectivity (run on server to diagnose upload issues)
 python db_test.py
 ```
 
@@ -34,6 +40,7 @@ python db_test.py
   - `SQLAlchemy>=2.0`
   - `PyMySQL>=1.1`
   - `python-dateutil>=2.8`
+- Dev/test packages (see `requirements-dev.txt`): `pytest`, `pytest-cov`, `flake8`
 
 ## Installation
 
@@ -42,12 +49,14 @@ python db_test.py
 ```bash
 conda create -n mpesa_parser python=3.9 -y
 conda activate mpesa_parser
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # includes runtime deps + test tools
 ```
 
 ### Option 2: Using pip
 
 ```bash
+pip install -r requirements-dev.txt   # includes runtime deps + test tools
+# or runtime only (no tests):
 pip install -r requirements.txt
 ```
 
@@ -55,6 +64,10 @@ pip install -r requirements.txt
 
 ```
 .
+├── .github/
+│   └── workflows/
+│       ├── ci.yml                # GitHub Actions CI (lint + tests on every push/PR)
+│       └── deploy.yml            # GitHub Actions CD (auto-deploy to server on merge to main)
 ├── Mpesa_pdf_statement/          # Input: Place PDF files here
 ├── Mpesa_csv_Statement_Parsed/   # Output: Successful CSVs
 ├── Mpesa_csv_Statement_Failed/   # Failed: PDFs that couldn't be parsed
@@ -75,13 +88,70 @@ pip install -r requirements.txt
 │   ├── features_207.sql          # 207-feature credit-scoring SQL query
 │   └── procedures/
 │       └── fly_profiling.sql     # fly_profiling stored procedure (auto-deployed at startup)
+├── scripts/
+│   ├── pre-push                  # Git pre-push hook source (install with: make hooks)
+│   └── server-deploy.sh          # Server-side deploy script (called by deploy.yml via SSH)
+├── tests/
+│   ├── test_config.py            # Tests for normalisation helpers and transaction-type mapping
+│   ├── test_parser.py            # Tests for PDF parsing logic
+│   └── test_parse_single.py      # Tests for phone validation and balance continuity check
+├── .env.example                  # Environment variable template (copy to .env)
 ├── config.py                     # Paths, DB credentials, regex patterns
+├── Makefile                      # Local dev shortcuts (make check, make test, make hooks, ...)
 ├── parse_single.py               # Single-file queued parser (PHP integration)
 ├── process_all_pdfs.py           # Batch processor
 ├── db_test.py                    # DB connectivity diagnostic script
+├── pytest.ini                    # Pytest configuration
+├── requirements.txt              # Runtime Python dependencies
+├── requirements-dev.txt          # Runtime + dev/test dependencies
 ├── run_parser.sh                 # Quick batch-run script
-├── requirements.txt              # Python dependencies
 └── README.md                     # This file
+```
+
+## CI / Testing
+
+### GitHub Actions
+
+The workflow at `.github/workflows/ci.yml` runs automatically on **every push and pull request** to any branch. It runs on Python 3.11 and 3.12 in parallel and:
+
+1. Installs all dependencies from `requirements-dev.txt`
+2. Runs `flake8` — hard-fails on syntax errors, undefined names, and unused imports
+3. Runs `pytest` with coverage and uploads the XML report as a build artifact (14-day retention)
+
+No database is required — tests run entirely offline using mock data.
+
+### Local checks (before pushing)
+
+```bash
+# One-time setup
+pip install -r requirements-dev.txt
+make hooks              # installs scripts/pre-push → .git/hooks/pre-push
+
+# Run everything (mirrors CI)
+make check              # lint + all 46 tests
+
+# Run individually
+make lint               # flake8 only
+make test               # pytest only
+make test-cov           # pytest + HTML coverage report at htmlcov/index.html
+```
+
+The **pre-push hook** (`scripts/pre-push`) runs `lint + pytest` automatically every time you run `git push`. The push is blocked if any check fails.
+
+To bypass in an emergency:
+
+```bash
+git push --no-verify
+```
+
+### Environment variables for local dev
+
+Copy `.env.example` to `.env` and fill in your DB credentials. The `.env` file is git-ignored — never commit it.
+
+```bash
+cp .env.example .env
+# then edit .env with your values
+export $(cat .env | xargs)
 ```
 
 ## Configuration
@@ -448,6 +518,66 @@ Re-run the script — already processed files have been moved:
 ```bash
 ./run_parser.sh
 ```
+
+## Deployment
+
+The project uses GitHub Actions to automatically deploy to the production server (`139.84.243.180`) whenever a branch is merged into `main`.
+
+### How it works
+
+1. A PR is merged into `main`.
+2. The **Deploy to Production** workflow (`.github/workflows/deploy.yml`) is triggered.
+3. GitHub Actions SSHs into the server and runs `scripts/server-deploy.sh`.
+4. The script pulls the latest code from `main`, activates the virtualenv, and syncs Python dependencies.
+
+The repo on the server lives at `/var/www/server/parser/` — so `parse_single.py` is at `/var/www/server/parser/parse_single.py`.
+
+### One-time server setup
+
+```bash
+# 1. Clone the repo
+git clone git@github.com:<ORG>/<REPO>.git /var/www/server/parser
+
+# 2. Create and populate the virtualenv
+cd /var/www/server/parser
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Create the .env file with real DB credentials (never commit this)
+cp .env.example .env
+# edit .env with production values
+```
+
+### SSH key setup
+
+```bash
+# On your local machine — generate a dedicated deploy key pair
+ssh-keygen -t ed25519 -C "github-deploy@mpesa-parser" -f ~/.ssh/mpesa_deploy -N ""
+
+# Authorize the public key on the server
+ssh-copy-id -i ~/.ssh/mpesa_deploy.pub <USER>@139.84.243.180
+```
+
+### GitHub Secrets
+
+Go to **GitHub repo → Settings → Secrets and variables → Actions** and add:
+
+| Secret | Value |
+|---|---|
+| `SSH_HOST` | `139.84.243.180` |
+| `SSH_USER` | Server username (e.g. `ubuntu`) |
+| `SSH_PRIVATE_KEY` | Contents of `~/.ssh/mpesa_deploy` (the private key) |
+
+### Branch protection (recommended)
+
+In **Settings → Branches → Add branch protection rule** for `main`, enable:
+
+- **Require status checks to pass before merging** — select the `CI / Lint & Test` checks.
+
+This ensures the deploy workflow only runs on commits that have already passed lint and tests.
+
+---
 
 ## Customization
 

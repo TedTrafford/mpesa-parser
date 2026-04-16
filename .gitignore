@@ -17,6 +17,8 @@ queue/
 # ── Debug / temp text files ───────────────────────────────────────────────────
 *.txt
 !requirements.txt
+!requirements-dev.txt
+README.md
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/

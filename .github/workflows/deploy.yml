@@ -1,0 +1,24 @@
+name: Deploy to Production
+
+# Triggers whenever a push lands on main (i.e. a PR is merged).
+# Enforce that CI passes first via branch-protection rules requiring the
+# "CI / Lint & Test" status checks before a PR can be merged.
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: SSH Deploy to 139.84.243.180
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: bash /var/www/server/parser/scripts/server-deploy.sh
