@@ -190,10 +190,11 @@ _PROCEDURES_DIR = os.path.join(
 def _deploy_fly_profiling_procedure(conn) -> None:
     """Read db/procedures/fly_profiling.sql and (re)create the stored procedure.
 
-    The DEFINER clause is stripped so the deploying DB user does not need
-    SUPER / SET_USER_ID privilege.  The DROP + CREATE pair is idempotent —
-    safe to call on every startup.  Edit fly_profiling.sql and restart the
-    app to pick up changes automatically.
+    The DEFINER clause and any database-qualifier on the procedure name are
+    stripped so the deploying DB user does not need SUPER / SET_USER_ID
+    privilege and the procedure is always created in the current database.
+    The DROP + CREATE pair is idempotent — safe to call on every startup.
+    Edit fly_profiling.sql and restart the app to pick up changes automatically.
     """
     sql_path = os.path.join(_PROCEDURES_DIR, "fly_profiling.sql")
     if not os.path.exists(sql_path):
@@ -208,6 +209,17 @@ def _deploy_fly_profiling_procedure(conn) -> None:
     proc_sql = re.sub(
         r"DEFINER\s*=\s*`[^`]+`@`[^`]+`\s*",
         "",
+        proc_sql,
+        flags=re.IGNORECASE,
+    )
+
+    # Strip any database-schema qualifier from the procedure name so it is
+    # created in the current database.  fly_profiling.sql ships with
+    # `Data_Science`.`fly_profiling` which would land in the wrong schema
+    # (or fail with an access-denied error) on most deployments.
+    proc_sql = re.sub(
+        r"(CREATE\s+PROCEDURE\s+)`[^`]+`\.",
+        r"\1",
         proc_sql,
         flags=re.IGNORECASE,
     )
@@ -242,6 +254,96 @@ def _migrate_normalize_mobile_numbers(conn) -> None:
         print(f"  DB: mobile numbers in `{DB_TABLE}` already normalised — no update needed")
 
 
+def _ensure_profiling_tables_exist(conn) -> None:
+    """Create the three tables consumed by the fly_profiling stored procedure.
+
+    All three statements are idempotent (CREATE TABLE IF NOT EXISTS), so this
+    is safe to call on every startup regardless of whether the tables already
+    exist.  Without these tables the procedure will raise a 1146 "Table
+    doesn't exist" error on every call, which is caught and silently logged
+    as profiling_status='FAILED:...' — producing no output rows anywhere.
+
+    tbl_scoring_features
+        Holds the 18 engineered features derived from tbl_raw_mpesa_statements
+        that feed the scorecard.  The procedure INSERTs one row here per call.
+
+    tbl_subscriber_profiles
+        Stores the final risk/turnover/credit-limit output computed for each
+        subscriber.  The procedure INSERTs one row here per call.
+
+    customer_credit_limit
+        Lookup table of approved credit limits.  The procedure DELETEs the
+        existing row (if any) for returning customers and INSERTs the updated
+        limit.  mobile_number is stored as DECIMAL(18,4) to match the CAST
+        used inside the procedure body.
+    """
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS `tbl_scoring_features` (
+            `id`                                 BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
+            `mobile_number`                      VARCHAR(20)      NOT NULL DEFAULT '',
+            `date_created`                       DATETIME         NOT NULL,
+            `flz_sum_amt_6m`                     DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            `kplc_paybills_cnt_trns_6m`          BIGINT           NOT NULL DEFAULT 0,
+            `all_received_money_sum_amt_6m`      DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            `all_send_money_sum_amt_6m`          DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            `p2p_send_money_cnt_unq_trns_3m`     BIGINT           NOT NULL DEFAULT 0,
+            `p2p_received_money_cnt_unq_trns_3m` BIGINT           NOT NULL DEFAULT 0,
+            `bank_deposit_sum_amt_6m`            DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            `p2p_received_money_sum_amt_6m`      DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            `all_received_money_sum_amt_3m`      DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            `all_send_money_sum_amt_3m`          DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            `p2p_received_money_cnt_unq_trns_1m` BIGINT           NOT NULL DEFAULT 0,
+            `avg_bal_3m`                         DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            `merch_sum_amt_3m`                   DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            `bet_cnt_trns_3m`                    BIGINT           NOT NULL DEFAULT 0,
+            `net_cashflow_6m`                    DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            `net_cnt_unq_sender_3m`              BIGINT           NOT NULL DEFAULT 0,
+            `net_banked_6m`                      DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
+            PRIMARY KEY (`id`),
+            INDEX `idx_sf_mobile_number` (`mobile_number`),
+            INDEX `idx_sf_date_created`  (`date_created`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+          COMMENT='Engineered features computed by fly_profiling for the scorecard'
+    """))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS `tbl_subscriber_profiles` (
+            `id`               BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
+            `mobile_number`    VARCHAR(20)      NOT NULL DEFAULT '',
+            `last_updated`     DATETIME         NOT NULL,
+            `month1_turnover`  DOUBLE           DEFAULT NULL,
+            `month2_turnover`  DOUBLE           DEFAULT NULL,
+            `month3_turnover`  DOUBLE           DEFAULT NULL,
+            `age_days`         DOUBLE           DEFAULT NULL,
+            `three_month_wavg` DOUBLE           DEFAULT NULL,
+            `risk_segment`     BIGINT           NOT NULL DEFAULT 0,
+            `turnover_segment` DOUBLE           NOT NULL DEFAULT 0,
+            `credit_limit`     INT              NOT NULL DEFAULT 0,
+            `total_score`      DOUBLE           DEFAULT NULL,
+            `model_category`   VARCHAR(50)      NOT NULL DEFAULT '',
+            PRIMARY KEY (`id`),
+            INDEX `idx_sp_mobile_number` (`mobile_number`),
+            INDEX `idx_sp_last_updated`  (`last_updated`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+          COMMENT='Per-subscriber risk profile and credit limit output from fly_profiling'
+    """))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS `customer_credit_limit` (
+            `id`                 BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
+            `mobile_number`      DECIMAL(18,4)    NOT NULL,
+            `credit_limit`       DECIMAL(18,4)    NOT NULL DEFAULT 0,
+            `profiling_date`     DATETIME         NOT NULL,
+            `profiling_category` VARCHAR(20)      NOT NULL DEFAULT '',
+            PRIMARY KEY (`id`),
+            INDEX `idx_ccl_mobile_number` (`mobile_number`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+          COMMENT='Approved credit limits maintained by fly_profiling'
+    """))
+
+    print("  DB: profiling tables (tbl_scoring_features, tbl_subscriber_profiles, customer_credit_limit) are ready")
+
+
 def ensure_table_exists():
     """Create tbl_raw_mpesa_statements if it does not already exist,
     and run any pending schema migrations including procedure deployment."""
@@ -251,6 +353,7 @@ def ensure_table_exists():
         _migrate_record_id(conn)
         _migrate_unique_key(conn)
         _migrate_normalize_mobile_numbers(conn)
+        _ensure_profiling_tables_exist(conn)
         _deploy_fly_profiling_procedure(conn)
     print(f"  DB: table `{DB_TABLE}` is ready")
 
