@@ -187,6 +187,8 @@ concurrently.
 
 ```bash
 python parse_single.py <record_id> <file_name> <pdf_path> <pin> <phone_number>
+
+python parse_single.py 1111 966265.pdf /var/www/server/parser/Mpesa_pdf_statement/966265.pd 966265 0703588602
 ```
 
 | Argument | Description |
@@ -538,6 +540,10 @@ The repo on the server lives at `/var/www/server/parser/` — so `parse_single.p
 # 1. Clone the repo
 git clone git@github.com:<ORG>/<REPO>.git /var/www/server/parser
 
+git clone git@github.com:Resley-Tech/aleza-mpesa-parser.git /var/www/server/parser
+
+git clone https://github.com/Resley-Tech/aleza-bi-app.git /var/www/server/parser
+
 # 2. Create and populate the virtualenv
 cd /var/www/server/parser
 python3 -m venv .venv
@@ -552,8 +558,9 @@ cp .env.example .env
 ### SSH key setup
 
 ```bash
-# On your local machine — generate a dedicated deploy key pair
-ssh-keygen -t ed25519 -C "github-deploy@mpesa-parser" -f ~/.ssh/mpesa_deploy -N ""
+# On your local machine — generate a dedicated deploy key pair with a custom name (to avoid any confusion with id_ed25519 or other existing SSH keys)
+ssh-keygen -t ed25519 -C "github-deploy@mpesa-parser" -f ~/.ssh/mpesa_parser_deploy -N ""
+```
 
 # Authorize the public key on the server
 ssh-copy-id -i ~/.ssh/mpesa_deploy.pub <USER>@139.84.243.180
