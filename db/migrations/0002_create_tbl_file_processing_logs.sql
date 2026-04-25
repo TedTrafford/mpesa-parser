@@ -1,6 +1,6 @@
 -- =============================================================================
 -- Migration 0002: Create tbl_file_processing_logs
--- Description   : Audit log for every PDF parsing job — tracks outcome,
+-- Description   : Audit log for every PDF parsing job -- tracks outcome,
 --                 row counts, profiling status, and phone validation.
 -- =============================================================================
 

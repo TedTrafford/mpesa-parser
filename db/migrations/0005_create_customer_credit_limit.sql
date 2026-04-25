@@ -4,9 +4,9 @@
 --                 subscriber.  fly_profiling() DELETEs + re-INSERTs the row
 --                 on each call so the table always reflects the latest score.
 --
---                 mobile_number is VARCHAR(20) — consistent with every other
+--                 mobile_number is VARCHAR(20) -- consistent with every other
 --                 table in the schema.  credit_limit is INT since limits are
---                 always whole-number amounts (0, 5000, 8000, …).
+--                 always whole-number amounts (0, 5000, 8000, etc.).
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS `customer_credit_limit` (
