@@ -4,8 +4,6 @@ CREATE DEFINER=`staging`@`%` PROCEDURE `Data_Science`.`fly_profiling`(
 BEGIN
 
     DECLARE update_check      DOUBLE   DEFAULT NULL;
-    DECLARE rtn_mobile_number TEXT     DEFAULT NULL;
-    DECLARE rtn_credit_limit  TEXT     DEFAULT NULL;
     DECLARE month1            DOUBLE   DEFAULT NULL;
     DECLARE month2            DOUBLE   DEFAULT NULL;
     DECLARE month3            DOUBLE   DEFAULT NULL;
@@ -356,18 +354,13 @@ BEGIN
              month1, month2, month3, age_days, three_month_wavg,
              risk_segment, turnover_segment, var_credit_limit, risk_score, model_category);
 
-        SET rtn_mobile_number = CAST(ip_mobile_number AS CHAR);
-        SET rtn_credit_limit  = CAST(var_credit_limit  AS CHAR);
-
         DELETE FROM customer_credit_limit
         WHERE  mobile_number = ip_mobile_number;
 
         INSERT INTO customer_credit_limit
             (mobile_number, credit_limit, profiling_date, profiling_category)
         VALUES
-            (CAST(rtn_mobile_number AS DECIMAL(18, 4)),
-             CAST(rtn_credit_limit  AS DECIMAL(18, 4)),
-             NOW(), 'FTB2');
+            (ip_mobile_number, var_credit_limit, NOW(), 'FTB2');
 
     ELSE
 
@@ -381,15 +374,10 @@ BEGIN
              month1, month2, month3, age_days, three_month_wavg,
              risk_segment, turnover_segment, var_credit_limit, risk_score, model_category);
 
-        SET rtn_mobile_number = CAST(ip_mobile_number AS CHAR);
-        SET rtn_credit_limit  = CAST(var_credit_limit  AS CHAR);
-
         INSERT INTO customer_credit_limit
             (mobile_number, credit_limit, profiling_date, profiling_category)
         VALUES
-            (CAST(rtn_mobile_number AS DECIMAL(18, 4)),
-             CAST(rtn_credit_limit  AS DECIMAL(18, 4)),
-             NOW(), 'FTB1');
+            (ip_mobile_number, var_credit_limit, NOW(), 'FTB1');
 
     END IF;
 

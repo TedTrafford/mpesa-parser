@@ -2,8 +2,13 @@
 """
 db/uploader.py
 --------------
-Handles creating the MySQL table (if it does not exist) and uploading a
-parsed M-PESA DataFrame to `tbl_raw_mpesa_statements`.
+Handles uploading a parsed M-PESA DataFrame to `tbl_raw_mpesa_statements`
+and writing processing audit logs to `tbl_file_processing_logs`.
+
+Schema management (table creation, column additions, data migrations) is
+handled entirely by db/migrate.py.  Call ensure_table_exists() once at
+startup to apply any pending migrations and deploy the fly_profiling
+stored procedure.
 
 Duplicate rows are silently skipped thanks to INSERT IGNORE — re-running the
 parser against the same PDF will not create duplicate records, and skipped
@@ -59,109 +64,29 @@ COLUMN_MAP = {
     "metadata":         "metadata",
 }
 
+
+
+
+def ensure_table_exists() -> None:
+    """Apply all pending database migrations and deploy the fly_profiling procedure.
+
+    Safe to call on every startup — migrations are tracked in schema_migrations
+    and each runs exactly once.  Subsequent calls are no-ops.
+    """
+    _db_dir = os.path.dirname(os.path.abspath(__file__))
+    if _db_dir not in sys.path:
+        sys.path.insert(0, _db_dir)
+    from migrate import run_migrations  # db/migrate.py
+
+    engine = get_engine()
+    run_migrations(engine)
+    with engine.begin() as conn:
+        _deploy_fly_profiling_procedure(conn)
+
 # ---------------------------------------------------------------------------
-# DDL — kept in sync with db/schema.sql
+# Custom pandas to_sql method — INSERT IGNORE so duplicate receipt_no rows
+# are silently skipped (aids duplicate and fraud identification).
 # ---------------------------------------------------------------------------
-_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS `{table}` (
-    `id`                BIGINT UNSIGNED     NOT NULL AUTO_INCREMENT,
-    `record_id`         VARCHAR(255)        NOT NULL DEFAULT '',
-    `customer_name`     VARCHAR(255)        NOT NULL DEFAULT '',
-    `mobile_number`     VARCHAR(20)         NOT NULL DEFAULT '',
-    `email_address`     VARCHAR(255)        NOT NULL DEFAULT '',
-    `statement_period`  VARCHAR(100)        NOT NULL DEFAULT '',
-    `request_date`      VARCHAR(50)         NOT NULL DEFAULT '',
-    `transaction_date`  DATE                NOT NULL,
-    `transaction_time`  TIME                NOT NULL,
-    `receipt_no`        VARCHAR(20)         NOT NULL,
-    `transaction_type`  VARCHAR(100)        NOT NULL DEFAULT '',
-    `details`           TEXT                NOT NULL,
-    `amount`            DECIMAL(15, 2)      NOT NULL,
-    `balance`           DECIMAL(15, 2)      NOT NULL,
-    `metadata`          JSON                NOT NULL,
-    PRIMARY KEY (`id`),
-    UNIQUE KEY  `uq_receipt_amount`    (`receipt_no`, `amount`),
-    INDEX       `idx_record_id`        (`record_id`),
-    INDEX       `idx_mobile_number`    (`mobile_number`),
-    INDEX       `idx_transaction_date` (`transaction_date`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  COMMENT='Raw M-PESA statement transactions parsed from PDF files'
-""".format(table=DB_TABLE)
-
-def _migrate_unique_key(conn) -> None:
-    """
-    Replace the old single-column unique key on receipt_no with a composite
-    key on (receipt_no, amount).
-
-    This allows M-PESA service charges to be stored alongside their parent
-    transactions — both rows share a receipt_no but carry different amounts,
-    so they are NOT duplicates.  True duplicates (identical receipt_no AND
-    amount) are still blocked by INSERT IGNORE.
-    """
-    # Check whether the old single-column key still exists
-    old_key_exists = conn.execute(text("""
-        SELECT COUNT(*) FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-        WHERE TABLE_SCHEMA    = DATABASE()
-          AND TABLE_NAME      = :tbl
-          AND CONSTRAINT_NAME = 'uq_receipt_no'
-          AND COLUMN_NAME     = 'receipt_no'
-    """), {"tbl": DB_TABLE}).scalar()
-
-    if old_key_exists:
-        conn.execute(text(
-            f"ALTER TABLE `{DB_TABLE}` DROP INDEX `uq_receipt_no`"
-        ))
-
-    # Add the composite key if it does not yet exist
-    new_key_exists = conn.execute(text("""
-        SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME   = :tbl
-          AND INDEX_NAME   = 'uq_receipt_amount'
-    """), {"tbl": DB_TABLE}).scalar()
-
-    if not new_key_exists:
-        conn.execute(text(
-            f"ALTER TABLE `{DB_TABLE}` "
-            f"ADD UNIQUE KEY `uq_receipt_amount` (`receipt_no`, `amount`)"
-        ))
-
-
-def _migrate_record_id(conn) -> None:
-    """
-    Add the record_id column and its index to an existing table.
-
-    Uses INFORMATION_SCHEMA checks so this is safe to call on every startup —
-    it is a no-op when the column / index already exist.  Avoids
-    ADD COLUMN IF NOT EXISTS / ADD INDEX IF NOT EXISTS, which are MariaDB-only
-    syntax and raise a syntax error on MySQL.
-    """
-    col_exists = conn.execute(text("""
-        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME   = :tbl
-          AND COLUMN_NAME  = 'record_id'
-    """), {"tbl": DB_TABLE}).scalar()
-
-    if not col_exists:
-        conn.execute(text(f"""
-            ALTER TABLE `{DB_TABLE}`
-                ADD COLUMN `record_id` VARCHAR(255) NOT NULL DEFAULT ''
-                    COMMENT 'Caller-supplied unique identifier from parse_single.py'
-                    AFTER `id`
-        """))
-
-    idx_exists = conn.execute(text("""
-        SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME   = :tbl
-          AND INDEX_NAME   = 'idx_record_id'
-    """), {"tbl": DB_TABLE}).scalar()
-
-    if not idx_exists:
-        conn.execute(text(f"""
-            ALTER TABLE `{DB_TABLE}` ADD INDEX `idx_record_id` (`record_id`)
-        """))
 
 
 # ---------------------------------------------------------------------------
@@ -229,133 +154,6 @@ def _deploy_fly_profiling_procedure(conn) -> None:
     print("  DB: procedure `fly_profiling` deployed")
 
 
-def _migrate_normalize_mobile_numbers(conn) -> None:
-    """Normalize mobile_number values from local format (0xxx) to international
-    format (254xxx) in tbl_raw_mpesa_statements.
-
-    Runs only when un-normalised rows are present — subsequent calls are
-    no-ops.  This one-time migration aligns historical data with the
-    normalization applied by normalize_mobile_number() in config.py so that
-    fly_profiling() joins work correctly.
-    """
-    count = conn.execute(text(f"""
-        SELECT COUNT(*) FROM `{DB_TABLE}`
-        WHERE mobile_number LIKE '0%'
-    """)).scalar()
-
-    if count:
-        conn.execute(text(f"""
-            UPDATE `{DB_TABLE}`
-            SET    mobile_number = CONCAT('254', SUBSTRING(mobile_number, 2))
-            WHERE  mobile_number LIKE '0%'
-        """))
-        print(f"  DB: normalised {count} mobile number(s) in `{DB_TABLE}` (0xxx → 254xxx)")
-    else:
-        print(f"  DB: mobile numbers in `{DB_TABLE}` already normalised — no update needed")
-
-
-def _ensure_profiling_tables_exist(conn) -> None:
-    """Create the three tables consumed by the fly_profiling stored procedure.
-
-    All three statements are idempotent (CREATE TABLE IF NOT EXISTS), so this
-    is safe to call on every startup regardless of whether the tables already
-    exist.  Without these tables the procedure will raise a 1146 "Table
-    doesn't exist" error on every call, which is caught and silently logged
-    as profiling_status='FAILED:...' — producing no output rows anywhere.
-
-    tbl_scoring_features
-        Holds the 18 engineered features derived from tbl_raw_mpesa_statements
-        that feed the scorecard.  The procedure INSERTs one row here per call.
-
-    tbl_subscriber_profiles
-        Stores the final risk/turnover/credit-limit output computed for each
-        subscriber.  The procedure INSERTs one row here per call.
-
-    customer_credit_limit
-        Lookup table of approved credit limits.  The procedure DELETEs the
-        existing row (if any) for returning customers and INSERTs the updated
-        limit.  mobile_number is stored as DECIMAL(18,4) to match the CAST
-        used inside the procedure body.
-    """
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS `tbl_scoring_features` (
-            `id`                                 BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
-            `mobile_number`                      VARCHAR(20)      NOT NULL DEFAULT '',
-            `date_created`                       DATETIME         NOT NULL,
-            `flz_sum_amt_6m`                     DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            `kplc_paybills_cnt_trns_6m`          BIGINT           NOT NULL DEFAULT 0,
-            `all_received_money_sum_amt_6m`      DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            `all_send_money_sum_amt_6m`          DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            `p2p_send_money_cnt_unq_trns_3m`     BIGINT           NOT NULL DEFAULT 0,
-            `p2p_received_money_cnt_unq_trns_3m` BIGINT           NOT NULL DEFAULT 0,
-            `bank_deposit_sum_amt_6m`            DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            `p2p_received_money_sum_amt_6m`      DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            `all_received_money_sum_amt_3m`      DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            `all_send_money_sum_amt_3m`          DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            `p2p_received_money_cnt_unq_trns_1m` BIGINT           NOT NULL DEFAULT 0,
-            `avg_bal_3m`                         DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            `merch_sum_amt_3m`                   DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            `bet_cnt_trns_3m`                    BIGINT           NOT NULL DEFAULT 0,
-            `net_cashflow_6m`                    DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            `net_cnt_unq_sender_3m`              BIGINT           NOT NULL DEFAULT 0,
-            `net_banked_6m`                      DECIMAL(15,2)    NOT NULL DEFAULT 0.00,
-            PRIMARY KEY (`id`),
-            INDEX `idx_sf_mobile_number` (`mobile_number`),
-            INDEX `idx_sf_date_created`  (`date_created`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-          COMMENT='Engineered features computed by fly_profiling for the scorecard'
-    """))
-
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS `tbl_subscriber_profiles` (
-            `id`               BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
-            `mobile_number`    VARCHAR(20)      NOT NULL DEFAULT '',
-            `last_updated`     DATETIME         NOT NULL,
-            `month1_turnover`  DOUBLE           DEFAULT NULL,
-            `month2_turnover`  DOUBLE           DEFAULT NULL,
-            `month3_turnover`  DOUBLE           DEFAULT NULL,
-            `age_days`         DOUBLE           DEFAULT NULL,
-            `three_month_wavg` DOUBLE           DEFAULT NULL,
-            `risk_segment`     BIGINT           NOT NULL DEFAULT 0,
-            `turnover_segment` DOUBLE           NOT NULL DEFAULT 0,
-            `credit_limit`     INT              NOT NULL DEFAULT 0,
-            `total_score`      DOUBLE           DEFAULT NULL,
-            `model_category`   VARCHAR(50)      NOT NULL DEFAULT '',
-            PRIMARY KEY (`id`),
-            INDEX `idx_sp_mobile_number` (`mobile_number`),
-            INDEX `idx_sp_last_updated`  (`last_updated`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-          COMMENT='Per-subscriber risk profile and credit limit output from fly_profiling'
-    """))
-
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS `customer_credit_limit` (
-            `id`                 BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
-            `mobile_number`      DECIMAL(18,4)    NOT NULL,
-            `credit_limit`       DECIMAL(18,4)    NOT NULL DEFAULT 0,
-            `profiling_date`     DATETIME         NOT NULL,
-            `profiling_category` VARCHAR(20)      NOT NULL DEFAULT '',
-            PRIMARY KEY (`id`),
-            INDEX `idx_ccl_mobile_number` (`mobile_number`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-          COMMENT='Approved credit limits maintained by fly_profiling'
-    """))
-
-    print("  DB: profiling tables (tbl_scoring_features, tbl_subscriber_profiles, customer_credit_limit) are ready")
-
-
-def ensure_table_exists():
-    """Create tbl_raw_mpesa_statements if it does not already exist,
-    and run any pending schema migrations including procedure deployment."""
-    engine = get_engine()
-    with engine.begin() as conn:
-        conn.execute(text(_CREATE_TABLE_SQL))
-        _migrate_record_id(conn)
-        _migrate_unique_key(conn)
-        _migrate_normalize_mobile_numbers(conn)
-        _ensure_profiling_tables_exist(conn)
-        _deploy_fly_profiling_procedure(conn)
-    print(f"  DB: table `{DB_TABLE}` is ready")
 
 
 # ---------------------------------------------------------------------------
@@ -473,122 +271,13 @@ CREATE TABLE IF NOT EXISTS `{table}` (
 """.format(table=DB_LOGS_TABLE)
 
 
-def _migrate_profiling_status_column(conn) -> None:
-    """Add profiling_status column to tbl_file_processing_logs on existing tables.
-
-    Safe to call on every startup — no-op when the column already exists.
-    """
-    col_exists = conn.execute(text("""
-        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME   = :tbl
-          AND COLUMN_NAME  = 'profiling_status'
-    """), {"tbl": DB_LOGS_TABLE}).scalar()
-
-    if not col_exists:
-        conn.execute(text(f"""
-            ALTER TABLE `{DB_LOGS_TABLE}`
-                ADD COLUMN `profiling_status` VARCHAR(255) NOT NULL DEFAULT ''
-                    AFTER `status`
-        """))
-
-
-def _migrate_phone_match_column(conn) -> None:
-    """Add phone_match column to tbl_file_processing_logs on existing tables.
-
-    Stores the result of validating the caller-supplied phone number against
-    the mobile number extracted from the PDF: 'MATCH', 'NO_MATCH', or 'N/A'.
-    Safe to call on every startup — no-op when the column already exists.
-    """
-    col_exists = conn.execute(text("""
-        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME   = :tbl
-          AND COLUMN_NAME  = 'phone_match'
-    """), {"tbl": DB_LOGS_TABLE}).scalar()
-
-    if not col_exists:
-        conn.execute(text(f"""
-            ALTER TABLE `{DB_LOGS_TABLE}`
-                ADD COLUMN `phone_match` VARCHAR(10) NOT NULL DEFAULT ''
-                    AFTER `profiling_status`
-        """))
-
-
-def _migrate_balance_check_pct_column(conn) -> None:
-    """Add balance_check_pct column to tbl_file_processing_logs on existing tables.
-
-    Stores the percentage of consecutive transaction pairs (ordered by date/time)
-    where balance[i] == balance[i-1] + amount[i].  NULL when the parse failed
-    or the file had fewer than 2 transactions.
-    Safe to call on every startup — no-op when the column already exists.
-    """
-    col_exists = conn.execute(text("""
-        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME   = :tbl
-          AND COLUMN_NAME  = 'balance_check_pct'
-    """), {"tbl": DB_LOGS_TABLE}).scalar()
-
-    if not col_exists:
-        conn.execute(text(f"""
-            ALTER TABLE `{DB_LOGS_TABLE}`
-                ADD COLUMN `balance_check_pct` DECIMAL(5, 2) DEFAULT NULL
-                    AFTER `phone_match`
-        """))
-
-
-def _migrate_supplied_phone_number_column(conn) -> None:
-    """Add supplied_phone_number column to tbl_file_processing_logs.
-
-    Stores the phone_number argument passed to parse_single.py (normalised to
-    international format).  Safe to call on every startup — no-op when the
-    column already exists.
-    """
-    col_exists = conn.execute(text("""
-        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME   = :tbl
-          AND COLUMN_NAME  = 'supplied_phone_number'
-    """), {"tbl": DB_LOGS_TABLE}).scalar()
-
-    if not col_exists:
-        conn.execute(text(f"""
-            ALTER TABLE `{DB_LOGS_TABLE}`
-                ADD COLUMN `supplied_phone_number` VARCHAR(20) NOT NULL DEFAULT ''
-                    AFTER `balance_check_pct`
-        """))
-
-
-def _migrate_extracted_phone_number_column(conn) -> None:
-    """Add extracted_phone_number column to tbl_file_processing_logs.
-
-    Stores the mobile number extracted from the PDF statement (normalised to
-    international format).  Safe to call on every startup — no-op when the
-    column already exists.
-    """
-    col_exists = conn.execute(text("""
-        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME   = :tbl
-          AND COLUMN_NAME  = 'extracted_phone_number'
-    """), {"tbl": DB_LOGS_TABLE}).scalar()
-
-    if not col_exists:
-        conn.execute(text(f"""
-            ALTER TABLE `{DB_LOGS_TABLE}`
-                ADD COLUMN `extracted_phone_number` VARCHAR(20) NOT NULL DEFAULT ''
-                    AFTER `supplied_phone_number`
-        """))
-
-
 def _ensure_logs_table_exists(conn) -> None:
+    """Ensure tbl_file_processing_logs exists with the current schema.
+
+    Uses CREATE TABLE IF NOT EXISTS so it is safe to call on every startup.
+    Column additions are handled by db/migrations/ (run via ensure_table_exists).
+    """
     conn.execute(text(_CREATE_LOGS_TABLE_SQL))
-    _migrate_profiling_status_column(conn)
-    _migrate_phone_match_column(conn)
-    _migrate_balance_check_pct_column(conn)
-    _migrate_supplied_phone_number_column(conn)
-    _migrate_extracted_phone_number_column(conn)
 
 
 def insert_processing_log(entry: dict) -> None:
