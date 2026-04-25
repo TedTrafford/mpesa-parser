@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 db/migrate.py
 -------------
@@ -24,9 +25,9 @@ Error handling
 --------------
 Certain MySQL errors indicate that a DDL statement is already in the
 desired state and can be safely skipped:
-    1060  ER_DUP_FIELDNAME   – ADD COLUMN on an already-existing column
-    1061  ER_DUP_KEYNAME     – ADD INDEX / ADD KEY on an already-existing key
-    1091  ER_CANT_DROP_FIELD_OR_KEY – DROP INDEX / DROP COLUMN that doesn't exist
+    1060  ER_DUP_FIELDNAME          -- ADD COLUMN on an already-existing column
+    1061  ER_DUP_KEYNAME            -- ADD INDEX / ADD KEY on an already-existing key
+    1091  ER_CANT_DROP_FIELD_OR_KEY -- DROP INDEX / DROP COLUMN that doesn't exist
 
 This lets migration SQL stay clean and declarative without needing
 per-statement conditional guards.
@@ -58,9 +59,9 @@ MIGRATIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migra
 # MySQL error codes that mean "already in desired state" for DDL statements
 # ---------------------------------------------------------------------------
 _IGNORABLE_ERRORS = {
-    1060,  # ER_DUP_FIELDNAME          – ADD COLUMN: column already exists
-    1061,  # ER_DUP_KEYNAME            – ADD INDEX / ADD KEY: key already exists
-    1091,  # ER_CANT_DROP_FIELD_OR_KEY – DROP INDEX / DROP COLUMN: doesn't exist
+    1060,  # ER_DUP_FIELDNAME          -- ADD COLUMN: column already exists
+    1061,  # ER_DUP_KEYNAME            -- ADD INDEX / ADD KEY: key already exists
+    1091,  # ER_CANT_DROP_FIELD_OR_KEY -- DROP INDEX / DROP COLUMN: doesn't exist
 }
 
 # ---------------------------------------------------------------------------
@@ -107,11 +108,11 @@ def _split_statements(sql_text: str) -> List[str]:
     """Split *sql_text* into individual executable statements.
 
     Strips single-line ``--`` comments then splits on ``;``.  Sufficient for
-    the straightforward DDL/DML in the migrations folder — does not handle
+    the straightforward DDL/DML in the migrations folder -- does not handle
     stored-procedure bodies or DELIMITER overrides (those live in
     db/procedures/ and are deployed separately).
     """
-    lines: List[str] = []
+    lines = []  # type: List[str]
     for line in sql_text.splitlines():
         if "--" in line:
             line = line[: line.index("--")]
@@ -132,7 +133,8 @@ def _applied_versions(conn) -> Set[str]:
     return {row[0] for row in rows}
 
 
-def _is_applied(engine: Engine, version: str) -> bool:
+def _is_applied(engine, version):
+    # type: (Engine, str) -> bool
     with engine.connect() as conn:
         count = conn.execute(
             text("SELECT COUNT(*) FROM schema_migrations WHERE version = :v"),
@@ -141,7 +143,8 @@ def _is_applied(engine: Engine, version: str) -> bool:
     return bool(count)
 
 
-def _apply_migration(conn, version: str, filepath: str) -> None:
+def _apply_migration(conn, version, filepath):
+    # type: (object, str, str) -> None
     """Execute every statement in *filepath* then record *version* as applied."""
     with open(filepath, "r", encoding="utf-8") as fh:
         content = fh.read()
@@ -151,7 +154,7 @@ def _apply_migration(conn, version: str, filepath: str) -> None:
             conn.execute(text(stmt))
         except Exception as exc:
             if _mysql_error_code(exc) in _IGNORABLE_ERRORS:
-                continue  # already in desired state — skip silently
+                continue  # already in desired state -- skip silently
             raise
 
     conn.execute(
@@ -167,13 +170,14 @@ def _apply_migration(conn, version: str, filepath: str) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def run_migrations(engine: Optional[Engine] = None) -> int:
+def run_migrations(engine=None):
+    # type: (Optional[Engine]) -> int
     """Apply all pending migrations in order.
 
     Parameters
     ----------
     engine:
-        An existing SQLAlchemy engine.  When *None* a new engine is created
+        An existing SQLAlchemy engine.  When None a new engine is created
         from the values in config.py.
 
     Returns
@@ -201,13 +205,13 @@ def run_migrations(engine: Optional[Engine] = None) -> int:
         with engine.begin() as conn:
             _apply_migration(conn, version, filepath)
 
-        print(f"  Migrations: ?  {version}")
+        print("  Migrations: [ok] %s" % version)
         count += 1
 
     if count == 0:
         print("  Migrations: all up to date")
     else:
-        print(f"  Migrations: {count} migration(s) applied")
+        print("  Migrations: %d migration(s) applied" % count)
 
     return count
 
@@ -216,7 +220,8 @@ def run_migrations(engine: Optional[Engine] = None) -> int:
 # CLI commands
 # ---------------------------------------------------------------------------
 
-def _cmd_status(engine: Engine) -> None:
+def _cmd_status(engine):
+    # type: (Engine) -> None
     """Print a table showing applied vs pending migrations."""
     with engine.begin() as conn:
         conn.execute(text(_CREATE_TRACKING_TABLE_SQL))
@@ -225,20 +230,21 @@ def _cmd_status(engine: Engine) -> None:
     files = _migration_files()
     col = max((len(f[:-4]) for f in files), default=20)
 
-    print(f"  {'STATUS':<10}  VERSION")
-    print(f"  {'-' * 10}  {'-' * col}")
+    print("  %-10s  VERSION" % "STATUS")
+    print("  %s  %s" % ("-" * 10, "-" * col))
     for filename in files:
         version = filename[:-4]
         status = "applied" if version in applied else "PENDING"
-        marker = "?" if version in applied else "·"
-        print(f"  {marker} {status:<9}  {version}")
+        marker = "[ok]" if version in applied else "[  ]"
+        print("  %s %-9s  %s" % (marker, status, version))
 
     pending = sum(1 for f in files if f[:-4] not in applied)
-    print()
-    print(f"  {len(applied)} applied   {pending} pending")
+    print("")
+    print("  %d applied   %d pending" % (len(applied), pending))
 
 
-def _cmd_baseline(engine: Engine) -> None:
+def _cmd_baseline(engine):
+    # type: (Engine) -> None
     """Mark every migration file as applied without executing its SQL.
 
     Use this once on a database that was created before the migration system
@@ -254,7 +260,7 @@ def _cmd_baseline(engine: Engine) -> None:
     for filename in files:
         version = filename[:-4]
         if version in applied:
-            print(f"  Baseline: (already tracked)  {version}")
+            print("  Baseline: (already tracked)  %s" % version)
             continue
 
         with engine.begin() as conn:
@@ -265,11 +271,11 @@ def _cmd_baseline(engine: Engine) -> None:
                 ),
                 {"v": version, "at": datetime.now(timezone.utc).replace(tzinfo=None)},
             )
-        print(f"  Baseline: ? registered        {version}")
+        print("  Baseline: [ok] registered  %s" % version)
         count += 1
 
-    print()
-    print(f"  Baseline complete — {count} migration(s) registered.")
+    print("")
+    print("  Baseline complete -- %d migration(s) registered." % count)
 
 
 # ---------------------------------------------------------------------------
