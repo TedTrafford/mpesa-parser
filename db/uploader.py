@@ -254,6 +254,50 @@ def _migrate_normalize_mobile_numbers(conn) -> None:
         print(f"  DB: mobile numbers in `{DB_TABLE}` already normalised — no update needed")
 
 
+def _migrate_customer_credit_limit_columns(conn) -> None:
+    """Migrate customer_credit_limit columns from DECIMAL(18,4) to correct types.
+
+    Early versions of the schema stored mobile_number as DECIMAL(18,4), which
+    caused phone numbers like 254722123456 to display as 254,722,123,456.0000
+    (with thousands-separator commas) in database clients.  credit_limit was
+    also DECIMAL(18,4) when it should be INT since limits are always integers.
+
+    Safe to call on every startup — no-op when columns are already the right
+    types.
+    """
+    mobile_type = conn.execute(text("""
+        SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = 'customer_credit_limit'
+          AND COLUMN_NAME  = 'mobile_number'
+    """)).scalar()
+
+    if mobile_type and mobile_type.lower() == "decimal":
+        conn.execute(text("""
+            ALTER TABLE `customer_credit_limit`
+                MODIFY COLUMN `mobile_number` VARCHAR(20) NOT NULL DEFAULT ''
+        """))
+        print("  DB: migrated customer_credit_limit.mobile_number DECIMAL → VARCHAR(20)")
+    else:
+        print("  DB: customer_credit_limit.mobile_number already correct type — no migration needed")
+
+    limit_type = conn.execute(text("""
+        SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = 'customer_credit_limit'
+          AND COLUMN_NAME  = 'credit_limit'
+    """)).scalar()
+
+    if limit_type and limit_type.lower() == "decimal":
+        conn.execute(text("""
+            ALTER TABLE `customer_credit_limit`
+                MODIFY COLUMN `credit_limit` INT NOT NULL DEFAULT 0
+        """))
+        print("  DB: migrated customer_credit_limit.credit_limit DECIMAL → INT")
+    else:
+        print("  DB: customer_credit_limit.credit_limit already correct type — no migration needed")
+
+
 def _ensure_profiling_tables_exist(conn) -> None:
     """Create the three tables consumed by the fly_profiling stored procedure.
 
@@ -274,8 +318,7 @@ def _ensure_profiling_tables_exist(conn) -> None:
     customer_credit_limit
         Lookup table of approved credit limits.  The procedure DELETEs the
         existing row (if any) for returning customers and INSERTs the updated
-        limit.  mobile_number is stored as DECIMAL(18,4) to match the CAST
-        used inside the procedure body.
+        limit.  mobile_number is VARCHAR(20) to match tbl_raw_mpesa_statements.
     """
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS `tbl_scoring_features` (
@@ -331,8 +374,8 @@ def _ensure_profiling_tables_exist(conn) -> None:
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS `customer_credit_limit` (
             `id`                 BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
-            `mobile_number`      DECIMAL(18,4)    NOT NULL,
-            `credit_limit`       DECIMAL(18,4)    NOT NULL DEFAULT 0,
+            `mobile_number`      VARCHAR(20)      NOT NULL DEFAULT '',
+            `credit_limit`       INT              NOT NULL DEFAULT 0,
             `profiling_date`     DATETIME         NOT NULL,
             `profiling_category` VARCHAR(20)      NOT NULL DEFAULT '',
             PRIMARY KEY (`id`),
@@ -342,6 +385,7 @@ def _ensure_profiling_tables_exist(conn) -> None:
     """))
 
     print("  DB: profiling tables (tbl_scoring_features, tbl_subscriber_profiles, customer_credit_limit) are ready")
+    _migrate_customer_credit_limit_columns(conn)
 
 
 def ensure_table_exists():
