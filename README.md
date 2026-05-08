@@ -20,6 +20,7 @@ Parses Safaricom M-PESA PDF bank statements into structured CSV files and upload
 - [Credit scoring](#credit-scoring)
 - [Development](#development)
 - [Deployment](#deployment)
+  - [Server initial setup](#server-initial-setup)
 
 ---
 
@@ -65,7 +66,8 @@ Each transaction row extracted from the PDF is deduplicated against the database
 │   │   ├── 0011_add_balance_check_pct_to_logs.sql
 │   │   ├── 0012_add_supplied_phone_to_logs.sql
 │   │   ├── 0013_add_extracted_phone_to_logs.sql
-│   │   └── 0014_fix_customer_credit_limit_types.sql
+│   │   ├── 0014_fix_customer_credit_limit_types.sql
+│   │   └── 0015_fix_customer_credit_limit_data.sql
 │   └── procedures/
 │       └── fly_profiling.sql      # Credit-scoring stored procedure
 ├── scripts/
@@ -237,7 +239,7 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 | `profiling_date` | `DATETIME` | When `fly_profiling()` last ran for this customer |
 | `profiling_category` | `VARCHAR(20)` | `FTB1` (new customer) or `FTB2` (returning customer) |
 
-> **Note:** Early deployments stored `mobile_number` and `credit_limit` as `DECIMAL(18,4)`, causing values to display with thousands-separator commas (e.g. `254,722,123,456.0000`). Migration `0014` corrects this automatically.
+> **Note:** Early deployments stored `mobile_number` and `credit_limit` as `DECIMAL(18,4)`, causing values to display with thousands-separator commas (e.g. `254,722,123,456.0000`). Migrations `0014` and `0015` correct this automatically — `0015` also strips any `.0000` decimal artefacts left in existing rows after the column type change.
 
 ---
 
@@ -321,8 +323,107 @@ The project deploys automatically to production via GitHub Actions on every merg
 
 Set these at: **Settings → Secrets and variables → Actions → Repository secrets**.
 
-### Server assumptions
+---
+
+### Server initial setup
+
+Run these steps **once** when setting up the server for the first time.  Subsequent deploys are handled automatically by the CI/CD pipeline.
+
+#### 1. Clone the repository
+
+```bash
+mkdir -p /var/www/server/parser
+cd /var/www/server/parser
+git clone <repo-url> .
+```
+
+#### 2. Create and activate a virtualenv
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+#### 3. Create runtime directories
+
+The parser reads PDFs from, and writes CSVs and logs to, directories that are **not** tracked by git and must be created manually:
+
+```bash
+cd /var/www/server/parser
+
+mkdir -p Mpesa_pdf_statement        # INPUT_DIR  — drop PDF statements here
+mkdir -p Mpesa_csv_Statement_Parsed # OUTPUT_DIR — parsed CSVs land here
+mkdir -p Mpesa_csv_Statement_Failed # FAILED_DIR — CSVs for failed parses
+mkdir -p logs                       # LOG_DIR    — application and error logs
+mkdir -p queue                      # job queue used by parse_single.py
+```
+
+| Directory | Config constant | Purpose |
+|---|---|---|
+| `Mpesa_pdf_statement/` | `INPUT_DIR` | Source PDFs for batch processing |
+| `Mpesa_csv_Statement_Parsed/` | `OUTPUT_DIR` | Output CSVs from successful parses |
+| `Mpesa_csv_Statement_Failed/` | `FAILED_DIR` | Output CSVs from failed parses |
+| `logs/` | `LOG_DIR` | Runtime logs and `db_errors.log` |
+| `queue/` | *(internal)* | File-based job queue for `parse_single.py` |
+
+#### 4. Configure environment variables
+
+```bash
+cp .env.example .env
+nano .env   # fill in DB credentials
+```
+
+Load them for the current session:
+
+```bash
+export $(cat .env | xargs)
+```
+
+To load them automatically on login, add the export line to `~/.bashrc` or `~/.profile`.
+
+#### 5. Run database migrations
+
+```bash
+source .venv/bin/activate
+export $(cat .env | xargs)
+python db/migrate.py
+```
+
+This creates all tables and the `schema_migrations` tracking table.  If the tables already exist from a previous setup, run `--baseline` first:
+
+```bash
+python db/migrate.py --baseline   # register existing state
+python db/migrate.py              # apply any new migrations
+```
+
+#### 6. Verify the setup
+
+```bash
+# Check migrations
+python db/migrate.py --status
+
+# Run a test parse
+python parse_single.py "test-001" "sample.pdf" "/path/to/sample.pdf" "1234" "254722123456"
+```
+
+#### Full one-liner (copy-paste)
+
+```bash
+cd /var/www/server/parser
+python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+mkdir -p Mpesa_pdf_statement Mpesa_csv_Statement_Parsed Mpesa_csv_Statement_Failed logs queue
+cp .env.example .env
+echo "Edit .env with your DB credentials, then run:"
+echo "  export \$(cat .env | xargs) && python db/migrate.py"
+```
+
+---
+
+### Server assumptions (ongoing deploys)
 
 - Repo is cloned at `/var/www/server/parser`
 - Virtualenv exists at `/var/www/server/parser/.venv`
 - `.env` with real credentials lives at `/var/www/server/parser/.env` (not tracked by git)
+- All runtime directories listed above exist
