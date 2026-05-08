@@ -1,6 +1,6 @@
 # M-PESA Statement Parser
 
-Parses Safaricom M-PESA PDF bank statements into structured CSV files and uploads the transactions to a MySQL database.  After each successful parse a credit-scoring stored procedure (`fly_profiling`) runs automatically to compute a credit limit for the customer.
+Parses Safaricom M-PESA PDF bank statements into structured CSV files and uploads the transactions to a MySQL database.  After each successful parse a credit-scoring stored procedure (`fly_profiling`) runs automatically to compute a credit limit for the customer.  A companion procedure (`sp_populate_rejection_reasons`) then explains, in ranked order, why any rejected subscriber did not qualify — surfacing the most impactful gate failure first, down to the specific scorecard feature with the most room for improvement.
 
 ---
 
@@ -18,6 +18,7 @@ Parses Safaricom M-PESA PDF bank statements into structured CSV files and upload
 - [Database schema](#database-schema)
 - [Migrations](#migrations)
 - [Credit scoring](#credit-scoring)
+  - [Rejection reasons](#rejection-reasons)
 - [Development](#development)
 - [Deployment](#deployment)
   - [Server initial setup](#server-initial-setup)
@@ -32,6 +33,11 @@ PDF statement  →  Parser  →  CSV  →  MySQL (tbl_raw_mpesa_statements)
                                    fly_profiling() stored procedure
                                            ↓
                               customer_credit_limit  /  tbl_subscriber_profiles
+                                           ↓  (model_category = 'not_qualified')
+                             sp_populate_rejection_reasons()
+                                           ↓
+                                  tbl_rejection_reasons
+                         (ranked reason codes + repayment probability)
 ```
 
 Each transaction row extracted from the PDF is deduplicated against the database using a composite key on `(receipt_no, amount)` — re-submitting the same PDF is safe.
@@ -67,9 +73,11 @@ Each transaction row extracted from the PDF is deduplicated against the database
 │   │   ├── 0012_add_supplied_phone_to_logs.sql
 │   │   ├── 0013_add_extracted_phone_to_logs.sql
 │   │   ├── 0014_fix_customer_credit_limit_types.sql
-│   │   └── 0015_fix_customer_credit_limit_data.sql
+│   │   ├── 0015_fix_customer_credit_limit_data.sql
+│   │   └── 0016_create_tbl_rejection_reasons.sql
 │   └── procedures/
-│       └── fly_profiling.sql      # Credit-scoring stored procedure
+│       ├── fly_profiling.sql                    # Credit-scoring stored procedure
+│       └── sp_populate_rejection_reasons.sql    # Rejection reason analysis procedure
 ├── scripts/
 │   ├── pre-push                   # Git hook — runs lint + tests before push
 │   └── server-deploy.sh           # Server-side deploy script (called by CI/CD)
@@ -151,7 +159,7 @@ All tables are created and kept up to date by the migration runner.
 python db/migrate.py
 ```
 
-This creates all five tables and the `schema_migrations` tracking table, then applies any historical data migrations (phone number normalisation, column additions, etc.).
+This creates all tables and the `schema_migrations` tracking table, then applies any historical data migrations (phone number normalisation, column additions, etc.).
 
 ### Existing database (set up before migrations were introduced)
 
@@ -228,6 +236,7 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 | `tbl_scoring_features` | 18 engineered features computed by `fly_profiling()` per customer. |
 | `tbl_subscriber_profiles` | Risk segment, turnover segment, and credit limit output per customer. |
 | `customer_credit_limit` | Latest approved credit limit per mobile number (maintained by `fly_profiling()`). |
+| `tbl_rejection_reasons` | Ranked rejection reasons for every `not_qualified` subscriber (see [Rejection reasons](#rejection-reasons)). |
 | `schema_migrations` | Tracks which migration files have been applied and when. |
 
 ### Key columns — `customer_credit_limit`
@@ -240,6 +249,31 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 | `profiling_category` | `VARCHAR(20)` | `FTB1` (new customer) or `FTB2` (returning customer) |
 
 > **Note:** Early deployments stored `mobile_number` and `credit_limit` as `DECIMAL(18,4)`, causing values to display with thousands-separator commas (e.g. `254,722,123,456.0000`). Migrations `0014` and `0015` correct this automatically — `0015` also strips any `.0000` decimal artefacts left in existing rows after the column type change.
+
+### Key columns — `tbl_rejection_reasons`
+
+| Column | Type | Notes |
+|---|---|---|
+| `mobile_number` | `VARCHAR(20)` | Primary lookup key — one subscriber, one set of reasons |
+| `profile_id` | `BIGINT UNSIGNED` | FK to the `tbl_subscriber_profiles` row that was rejected |
+| `reason_rank` | `TINYINT UNSIGNED` | `1` = most impactful reason for this subscriber; dense-ranked |
+| `reason_code` | `VARCHAR(60)` | Machine-readable enum (see table below) |
+| `reason_detail` | `TEXT` | Human-readable sentence for the credit analyst |
+| `feature_name` | `VARCHAR(100)` | Populated only for `WEAK_SCORING_FEATURE` rows |
+| `feature_value` | `DOUBLE` | Raw feature value at scoring time |
+| `score_actual` | `INT` | Points this feature contributed |
+| `score_max` | `INT` | Maximum points this feature could contribute |
+| `score_gap` | `INT` | `score_max − score_actual`; higher = more points lost |
+| `repayment_probability` | `DECIMAL(5,2)` | Estimated probability of repayment (%) derived from `total_score` via logistic sigmoid |
+
+**Reason codes, in priority order:**
+
+| Code | Condition | Rank |
+|---|---|---|
+| `INSUFFICIENT_HISTORY` | `age_days < 90` — hard gate; no limit possible regardless of score | 1 |
+| `WEAK_SCORING_FEATURE` | The single scorecard feature with the highest score gap (most points lost vs. maximum) | 1 or 2 |
+| `LOW_TURNOVER` | `turnover_segment` below the minimum required for the subscriber's `risk_segment` | 2 or 3 |
+| `HIGH_CREDIT_RISK` | `risk_segment ≤ 2` — score so low no achievable turnover level can qualify the subscriber | 2 or 3 |
 
 ---
 
@@ -281,6 +315,41 @@ After each successful parse, `fly_profiling(<mobile_number>)` is called automati
 4. Writes results to `tbl_scoring_features`, `tbl_subscriber_profiles`, and `customer_credit_limit`.
 
 The stored procedure is read from `db/procedures/fly_profiling.sql` and (re)deployed on every startup — edit the file and restart to pick up changes.
+
+### Rejection reasons
+
+Subscribers whose `model_category` is set to `not_qualified` by `fly_profiling` can be analysed by the companion procedure `sp_populate_rejection_reasons()`. It is **not** called automatically on every parse; run it on demand (e.g. after a bulk profiling run or on a scheduled basis):
+
+```sql
+CALL sp_populate_rejection_reasons();
+```
+
+The procedure is idempotent — it only processes `not_qualified` mobile numbers that have no entry yet in `tbl_rejection_reasons`, using `mobile_number` as the primary identifier. Re-running it after new rejections accumulate is safe.
+
+For each subscriber it inserts up to three ranked reasons, derived entirely from data already in the database:
+
+| Priority | Source | What it tells you |
+|---|---|---|
+| **1 — `INSUFFICIENT_HISTORY`** | `tbl_subscriber_profiles.age_days` | Statement history < 90 days; the subscriber simply needs to wait |
+| **2 — `WEAK_SCORING_FEATURE`** | `tbl_scoring_features` (latest row) | The one scorecard feature that lost the most points relative to its maximum — the highest-leverage behaviour to improve |
+| **3 — `LOW_TURNOVER` / `HIGH_CREDIT_RISK`** | `tbl_subscriber_profiles` | Turnover too low for the subscriber's risk level, or risk score too low for any turnover to compensate |
+
+Each reason row also carries a **`repayment_probability`** — the subscriber's estimated probability of repayment expressed as a percentage, computed from the scorecard total via a logistic sigmoid:
+
+```
+P = 100 / (1 + exp(−(total_score − 100) / 35))
+```
+
+Reference calibration points against the scoring model's segments:
+
+| Risk segment | Approx. score | Repayment probability |
+|---|---|---|
+| 1 (≤ 45) | 45 | ~17% |
+| 3 (< 81) | 81 | ~39% |
+| 5 (< 127) | 127 | ~65% |
+| 8 (≥ 169) | 169 | ~88% |
+
+The procedure source lives at `db/procedures/sp_populate_rejection_reasons.sql`; the table DDL and `CREATE PROCEDURE` statement are in migration `0016`.
 
 ---
 
