@@ -81,7 +81,7 @@ def ensure_table_exists() -> None:
     engine = get_engine()
     run_migrations(engine)
     with engine.begin() as conn:
-        _deploy_fly_profiling_procedure(conn)
+        _deploy_all_procedures(conn)
 
 # ---------------------------------------------------------------------------
 # Custom pandas to_sql method — INSERT IGNORE so duplicate receipt_no rows
@@ -112,46 +112,59 @@ _PROCEDURES_DIR = os.path.join(
 )
 
 
-def _deploy_fly_profiling_procedure(conn) -> None:
-    """Read db/procedures/fly_profiling.sql and (re)create the stored procedure.
+def _deploy_all_procedures(conn) -> None:
+    """Read every .sql file in db/procedures/ and (re)create each stored procedure.
 
-    The DEFINER clause and any database-qualifier on the procedure name are
-    stripped so the deploying DB user does not need SUPER / SET_USER_ID
-    privilege and the procedure is always created in the current database.
-    The DROP + CREATE pair is idempotent — safe to call on every startup.
-    Edit fly_profiling.sql and restart the app to pick up changes automatically.
+    For each file the deployer:
+      - Strips the DEFINER clause so the caller does not need SUPER / SET_USER_ID.
+      - Strips any database-schema qualifier from the CREATE PROCEDURE line so the
+        procedure is always created in the current database.
+      - Extracts the procedure name from the CREATE PROCEDURE statement.
+      - Issues DROP PROCEDURE IF EXISTS + CREATE PROCEDURE (idempotent).
+
+    Adding a new .sql file to db/procedures/ and restarting the app is all that
+    is needed to deploy a new stored procedure.
     """
-    sql_path = os.path.join(_PROCEDURES_DIR, "fly_profiling.sql")
-    if not os.path.exists(sql_path):
-        print("  DB: fly_profiling.sql not found — skipping procedure deployment")
+    if not os.path.isdir(_PROCEDURES_DIR):
+        print("  DB: procedures directory not found — skipping procedure deployment")
         return
 
-    with open(sql_path, "r", encoding="utf-8") as fh:
-        proc_sql = fh.read().strip()
+    sql_files = sorted(f for f in os.listdir(_PROCEDURES_DIR) if f.endswith(".sql"))
+    if not sql_files:
+        print("  DB: no procedure files found in db/procedures/")
+        return
 
-    # Strip DEFINER clause — MySQL rejects it unless the caller has
-    # SUPER or SET_USER_ID; the procedure will be owned by the session user.
-    proc_sql = re.sub(
-        r"DEFINER\s*=\s*`[^`]+`@`[^`]+`\s*",
-        "",
-        proc_sql,
-        flags=re.IGNORECASE,
-    )
+    for filename in sql_files:
+        sql_path = os.path.join(_PROCEDURES_DIR, filename)
+        with open(sql_path, "r", encoding="utf-8") as fh:
+            proc_sql = fh.read().strip()
 
-    # Strip any database-schema qualifier from the procedure name so it is
-    # created in the current database.  fly_profiling.sql ships with
-    # `Data_Science`.`fly_profiling` which would land in the wrong schema
-    # (or fail with an access-denied error) on most deployments.
-    proc_sql = re.sub(
-        r"(CREATE\s+PROCEDURE\s+)`[^`]+`\.",
-        r"\1",
-        proc_sql,
-        flags=re.IGNORECASE,
-    )
+        # Strip DEFINER clause.
+        proc_sql = re.sub(
+            r"DEFINER\s*=\s*`[^`]+`@`[^`]+`\s*",
+            "",
+            proc_sql,
+            flags=re.IGNORECASE,
+        )
 
-    conn.execute(text("DROP PROCEDURE IF EXISTS `fly_profiling`"))
-    conn.execute(text(proc_sql))
-    print("  DB: procedure `fly_profiling` deployed")
+        # Strip database-schema qualifier from the procedure name.
+        proc_sql = re.sub(
+            r"(CREATE\s+PROCEDURE\s+)`[^`]+`\.",
+            r"\1",
+            proc_sql,
+            flags=re.IGNORECASE,
+        )
+
+        # Extract procedure name from CREATE PROCEDURE line.
+        m = re.search(r"CREATE\s+PROCEDURE\s+`([^`]+)`", proc_sql, re.IGNORECASE)
+        if not m:
+            print(f"  DB: could not parse procedure name from {filename} — skipping")
+            continue
+        proc_name = m.group(1)
+
+        conn.execute(text(f"DROP PROCEDURE IF EXISTS `{proc_name}`"))
+        conn.execute(text(proc_sql))
+        print(f"  DB: procedure `{proc_name}` deployed")
 
 
 

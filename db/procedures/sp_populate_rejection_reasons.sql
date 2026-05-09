@@ -2,38 +2,11 @@ CREATE DEFINER=`staging`@`%` PROCEDURE `Data_Science`.`sp_populate_rejection_rea
 BEGIN
 
     -- -----------------------------------------------------------------------
-    -- Explains why each not_qualified subscriber was rejected, ordered from
-    -- the most impactful gate to the most actionable detail.
+    -- Step 1: Candidates: rejected profiles that have no reasons recorded yet.
     --
-    -- Reason codes and their priority ranks
-    -- ??????????????????????????????????????
-    --  INSUFFICIENT_HISTORY  (rank 1)
-    --      age_days < 90.  Hard gate � no limit can be assigned regardless of
-    --      score or turnover until 90 days of statement history exist.
-    --
-    --  WEAK_SCORING_FEATURE  (rank 1 if no history fail, else rank 2)
-    --      The single scorecard feature that contributed the fewest points
-    --      relative to its maximum (highest score_gap).  This is the lever
-    --      with the greatest room for improvement.
-    --
-    --  LOW_TURNOVER          (rank 2/3, when risk_segment >= 3)
-    --      turnover_segment is below the minimum required for the subscriber's
-    --      risk_segment to qualify, even though the risk score itself is
-    --      otherwise borderline acceptable.
-    --
-    --  HIGH_CREDIT_RISK      (rank 2/3, when risk_segment <= 2)
-    --      risk_segment is so low that no achievable turnover level can qualify
-    --      the subscriber.  Underlying scoring behaviour must improve first.
-    --
-    -- Idempotency
-    -- ???????????
-    --  Only processes rejected profiles (model_category = 'not_qualified') in
-    --  tbl_subscriber_profiles that have no row yet in tbl_rejection_reasons
-    --  (matched on profile_id).  Safe to call repeatedly.
-    -- -----------------------------------------------------------------------
-
-    -- -----------------------------------------------------------------------
-    -- Step 1 � Candidates: rejected profiles with no reasons recorded yet.
+    --   has_hist_fail = 1 means age_days < 90 (history gate failed).
+    --   Used to offset reason_rank for subsequent reasons so ranks stay dense
+    --   per subscriber.
     -- -----------------------------------------------------------------------
     DROP TEMPORARY TABLE IF EXISTS _tmp_rr_cands;
     CREATE TEMPORARY TABLE _tmp_rr_cands (
@@ -78,7 +51,8 @@ BEGIN
       );
 
     -- -----------------------------------------------------------------------
-    -- Step 2 � Latest scoring features per candidate.
+    -- Step 2: Latest scoring features per candidate.
+    --         One row per mobile_number (most recent date_created wins).
     -- -----------------------------------------------------------------------
     DROP TEMPORARY TABLE IF EXISTS _tmp_latest_sf;
     CREATE TEMPORARY TABLE _tmp_latest_sf AS
@@ -97,9 +71,12 @@ BEGIN
     ALTER TABLE _tmp_latest_sf ADD INDEX idx_lsf_mobile (mobile_number);
 
     -- -----------------------------------------------------------------------
-    -- Step 3 � Unpivot all 11 scorecard features into one row per feature per
-    --          customer, computing score_actual and score_max from the same
-    --          CASE logic used inside fly_profiling.
+    -- Step 3: Unpivot scoring features into one row per feature per customer,
+    --         then select the feature with the highest score_gap (most points
+    --         lost vs. the theoretical maximum for that feature).
+    --
+    --   score_gap = score_max - score_actual
+    --   Highest score_gap = single biggest drag on the scorecard total.
     -- -----------------------------------------------------------------------
     DROP TEMPORARY TABLE IF EXISTS _tmp_all_feature_scores;
     CREATE TEMPORARY TABLE _tmp_all_feature_scores AS
@@ -107,7 +84,7 @@ BEGIN
            (score_max - score_actual) AS score_gap
     FROM (
 
-        -- net_cnt_unq_sender_3m  (max 31, floor ?10, range 41)
+        -- net_cnt_unq_sender_3m  (max 31, floor -10, range 41 -- highest weight)
         SELECT mobile_number,
                'net_cnt_unq_sender_3m'  AS feature_name,
                net_cnt_unq_sender_3m    AS feature_value,
@@ -124,7 +101,7 @@ BEGIN
 
         UNION ALL
 
-        -- net_cashflow_6m  (max 31, floor ?5, range 36)
+        -- net_cashflow_6m  (max 31, floor -5, range 36)
         SELECT mobile_number,
                'net_cashflow_6m',
                net_cashflow_6m,
@@ -141,7 +118,7 @@ BEGIN
 
         UNION ALL
 
-        -- flz_sum_amt_6m  (max 35, floor 8, range 27)
+        -- flz_sum_amt_6m  (max 35, floor 8, range 27 -- highest absolute ceiling)
         SELECT mobile_number,
                'flz_sum_amt_6m',
                flz_sum_amt_6m,
@@ -156,7 +133,7 @@ BEGIN
 
         UNION ALL
 
-        -- kplc_paybills_cnt_trns_6m  (max 20, floor ?5, range 25)
+        -- kplc_paybills_cnt_trns_6m  (max 20, floor -5, range 25)
         SELECT mobile_number,
                'kplc_paybills_cnt_trns_6m',
                kplc_paybills_cnt_trns_6m,
@@ -172,7 +149,7 @@ BEGIN
 
         UNION ALL
 
-        -- avg_bal_3m  (max 20, floor ?3, range 23)
+        -- avg_bal_3m  (max 20, floor -3, range 23)
         SELECT mobile_number,
                'avg_bal_3m',
                avg_bal_3m,
@@ -188,7 +165,7 @@ BEGIN
 
         UNION ALL
 
-        -- bet_cnt_trns_3m  (max 0, floor ?20, range 20)
+        -- bet_cnt_trns_3m  (max 0, floor -20, range 20 -- pure negative impact)
         SELECT mobile_number,
                'bet_cnt_trns_3m',
                bet_cnt_trns_3m,
@@ -287,7 +264,8 @@ BEGIN
     ALTER TABLE _tmp_all_feature_scores ADD INDEX idx_afs_mobile (mobile_number);
 
     -- -----------------------------------------------------------------------
-    -- Step 4 � Keep only the worst feature per subscriber.
+    -- Step 4: Keep only the worst feature per subscriber (highest score_gap;
+    --         ties broken by lowest score_actual).
     -- -----------------------------------------------------------------------
     DROP TEMPORARY TABLE IF EXISTS _tmp_worst_feature;
     CREATE TEMPORARY TABLE _tmp_worst_feature AS
@@ -306,11 +284,12 @@ BEGIN
     ALTER TABLE _tmp_worst_feature ADD INDEX idx_wf_mobile (mobile_number);
 
     -- =======================================================================
-    -- INSERTIONS
+    -- INSERTIONS  (most impactful reason first)
     -- =======================================================================
 
     -- -----------------------------------------------------------------------
-    -- INSUFFICIENT_HISTORY  (rank 1)
+    -- Reason INSUFFICIENT_HISTORY (rank 1)
+    --   Hard gate: no credit limit can be assigned until age_days >= 90.
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
         (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
@@ -334,7 +313,11 @@ BEGIN
     WHERE c.age_days IS NULL OR c.age_days < 90;
 
     -- -----------------------------------------------------------------------
-    -- WEAK_SCORING_FEATURE  (rank = 1 + has_hist_fail)
+    -- Reason WEAK_SCORING_FEATURE
+    --   The single derived feature that contributed the fewest points relative
+    --   to its theoretical maximum -- the lever with the most room to improve.
+    --
+    --   Rank = 1 when no history failure; rank = 2 when history also failed.
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
         (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
@@ -376,9 +359,17 @@ BEGIN
     JOIN  _tmp_worst_feature wf ON wf.mobile_number = c.mobile_number;
 
     -- -----------------------------------------------------------------------
-    -- LOW_TURNOVER  (rank = 2 + has_hist_fail)
-    --   Only when risk_segment >= 3 and turnover_segment is below the
-    --   minimum required to qualify at that risk level.
+    -- Reason LOW_TURNOVER
+    --   Applies when age_days >= 90, risk_segment >= 3, but turnover_segment
+    --   is still below the minimum required to qualify at that risk level.
+    --
+    --   Qualification thresholds (from fly_profiling model_category logic):
+    --     risk_segment = 3  -> need turnover_segment >= 7
+    --     risk_segment = 4  -> need turnover_segment >= 6
+    --     risk_segment = 5  -> need turnover_segment >= 5
+    --     risk_segment = 6  -> need turnover_segment >= 4
+    --     risk_segment = 7  -> need turnover_segment >= 3
+    --     risk_segment = 8  -> need turnover_segment >= 2
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
         (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
@@ -425,9 +416,10 @@ BEGIN
           END;
 
     -- -----------------------------------------------------------------------
-    -- HIGH_CREDIT_RISK  (rank = 2 + has_hist_fail)
-    --   Only when age_days >= 90 but risk_segment <= 2.
-    --   No achievable turnover level can qualify this subscriber.
+    -- Reason HIGH_CREDIT_RISK
+    --   Applies when age_days >= 90 but risk_segment <= 2.
+    --   No achievable turnover level can qualify this subscriber; the risk
+    --   score itself must improve before any limit can be granted.
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
         (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
