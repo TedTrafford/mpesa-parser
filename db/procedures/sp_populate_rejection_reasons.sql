@@ -1,3 +1,5 @@
+DELIMITER $$
+
 CREATE PROCEDURE `sp_populate_rejection_reasons`()
 BEGIN
 
@@ -6,6 +8,10 @@ BEGIN
     --   Hard gate: no credit limit can be assigned until age_days >= 90.
     --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
+    INSERT INTO tbl_rejection_reasons
+        (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
+         feature_name, feature_value, score_actual, score_max, score_gap,
+         repayment_probability)
     WITH cands AS (
         SELECT
             sp.id                AS profile_id,
@@ -33,10 +39,6 @@ BEGIN
                 AND  rr.reason_code   = 'INSUFFICIENT_HISTORY'
           )
     )
-    INSERT INTO tbl_rejection_reasons
-        (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
-         feature_name, feature_value, score_actual, score_max, score_gap,
-         repayment_probability)
     SELECT
         c.mobile_number,
         c.profile_id,
@@ -62,6 +64,10 @@ BEGIN
     --   also failed.
     --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
+    INSERT INTO tbl_rejection_reasons
+        (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
+         feature_name, feature_value, score_actual, score_max, score_gap,
+         repayment_probability)
     WITH cands AS (
         SELECT
             sp.id                AS profile_id,
@@ -297,10 +303,6 @@ BEGIN
         ) ranked
         WHERE rn = 1
     )
-    INSERT INTO tbl_rejection_reasons
-        (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
-         feature_name, feature_value, score_actual, score_max, score_gap,
-         repayment_probability)
     SELECT
         c.mobile_number,
         c.profile_id,
@@ -350,6 +352,10 @@ BEGIN
     --     risk_segment = 8  -> need turnover_segment >= 2
     --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
+    INSERT INTO tbl_rejection_reasons
+        (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
+         feature_name, feature_value, score_actual, score_max, score_gap,
+         repayment_probability)
     WITH cands AS (
         SELECT
             sp.id                AS profile_id,
@@ -377,10 +383,6 @@ BEGIN
                 AND  rr.reason_code   = 'LOW_TURNOVER'
           )
     )
-    INSERT INTO tbl_rejection_reasons
-        (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
-         feature_name, feature_value, score_actual, score_max, score_gap,
-         repayment_probability)
     SELECT
         c.mobile_number,
         c.profile_id,
@@ -428,6 +430,10 @@ BEGIN
     --   score itself must improve before any limit can be granted.
     --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
+    INSERT INTO tbl_rejection_reasons
+        (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
+         feature_name, feature_value, score_actual, score_max, score_gap,
+         repayment_probability)
     WITH cands AS (
         SELECT
             sp.id                AS profile_id,
@@ -455,10 +461,6 @@ BEGIN
                 AND  rr.reason_code   = 'HIGH_CREDIT_RISK'
           )
     )
-    INSERT INTO tbl_rejection_reasons
-        (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
-         feature_name, feature_value, score_actual, score_max, score_gap,
-         repayment_probability)
     SELECT
         c.mobile_number,
         c.profile_id,
@@ -479,4 +481,6 @@ BEGIN
     WHERE (c.age_days IS NULL OR c.age_days >= 90)
       AND c.risk_segment <= 2;
 
-END
+END$$
+
+DELIMITER ;
