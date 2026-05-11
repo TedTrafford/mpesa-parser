@@ -136,7 +136,7 @@ def _deploy_all_procedures(conn) -> None:
 
     for filename in sql_files:
         sql_path = os.path.join(_PROCEDURES_DIR, filename)
-        with open(sql_path, "r", encoding="utf-8") as fh:
+        with open(sql_path, "r", encoding="utf-8", errors="replace") as fh:
             proc_sql = fh.read().strip()
 
         # Strip DELIMITER directives — DELIMITER is a client-only concept;

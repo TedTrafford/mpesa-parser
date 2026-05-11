@@ -59,7 +59,7 @@ BEGIN
     -- -----------------------------------------------------------------------
     -- Reason WEAK_SCORING_FEATURE (rank 1 or 2)
     --   The single scorecard feature with the highest score_gap (most points
-    --   lost vs. the theoretical maximum) — the lever with the most room to
+    --   lost vs. the theoretical maximum) - the lever with the most room to
     --   improve.  Rank = 1 when no history failure; rank = 2 when history
     --   also failed.
     --   Idempotent: skips any subscriber that already has this reason_code.
@@ -113,7 +113,7 @@ BEGIN
                (score_max - score_actual) AS score_gap
         FROM (
 
-            -- net_cnt_unq_sender_3m  (max 31, floor -10, range 41 — highest weight)
+            -- net_cnt_unq_sender_3m  (max 31, floor -10, range 41 - highest weight)
             SELECT mobile_number,
                    'net_cnt_unq_sender_3m' AS feature_name,
                    net_cnt_unq_sender_3m   AS feature_value,
@@ -147,7 +147,7 @@ BEGIN
 
             UNION ALL
 
-            -- flz_sum_amt_6m  (max 35, floor 8, range 27 — highest absolute ceiling)
+            -- flz_sum_amt_6m  (max 35, floor 8, range 27 - highest absolute ceiling)
             SELECT mobile_number,
                    'flz_sum_amt_6m',
                    flz_sum_amt_6m,
@@ -194,7 +194,7 @@ BEGIN
 
             UNION ALL
 
-            -- bet_cnt_trns_3m  (max 0, floor -20, range 20 — pure negative impact)
+            -- bet_cnt_trns_3m  (max 0, floor -20, range 20 - pure negative impact)
             SELECT mobile_number,
                    'bet_cnt_trns_3m',
                    bet_cnt_trns_3m,
