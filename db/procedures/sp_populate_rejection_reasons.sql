@@ -1,300 +1,44 @@
-CREATE DEFINER=`staging`@`%` PROCEDURE `Data_Science`.`sp_populate_rejection_reasons`()
+DELIMITER $$
+
+CREATE PROCEDURE `sp_populate_rejection_reasons`()
 BEGIN
-
-    -- -----------------------------------------------------------------------
-    -- Step 1: Candidates: rejected profiles that have no reasons recorded yet.
-    --
-    --   has_hist_fail = 1 means age_days < 90 (history gate failed).
-    --   Used to offset reason_rank for subsequent reasons so ranks stay dense
-    --   per subscriber.
-    -- -----------------------------------------------------------------------
-    DROP TEMPORARY TABLE IF EXISTS _tmp_rr_cands;
-    CREATE TEMPORARY TABLE _tmp_rr_cands (
-        profile_id        BIGINT UNSIGNED NOT NULL,
-        mobile_number     VARCHAR(20)     NOT NULL,
-        age_days          DOUBLE          DEFAULT NULL,
-        three_month_wavg  DOUBLE          DEFAULT NULL,
-        turnover_segment  DOUBLE          NOT NULL DEFAULT 0,
-        risk_segment      BIGINT          NOT NULL DEFAULT 0,
-        total_score       DOUBLE          DEFAULT NULL,
-        has_hist_fail     TINYINT         NOT NULL DEFAULT 0,
-        PRIMARY KEY (mobile_number),
-        INDEX idx_cands_profile_id (profile_id)
-    );
-
-    INSERT INTO _tmp_rr_cands
-        (profile_id, mobile_number, age_days, three_month_wavg,
-         turnover_segment, risk_segment, total_score, has_hist_fail)
-    SELECT
-        sp.id,
-        sp.mobile_number,
-        sp.age_days,
-        sp.three_month_wavg,
-        sp.turnover_segment,
-        sp.risk_segment,
-        sp.total_score,
-        CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END
-    FROM (
-        SELECT sp2.*,
-               ROW_NUMBER() OVER (
-                   PARTITION BY sp2.mobile_number
-                   ORDER BY     sp2.last_updated DESC
-               ) AS rn
-        FROM   tbl_subscriber_profiles sp2
-        WHERE  sp2.model_category = 'not_qualified'
-    ) sp
-    WHERE sp.rn = 1
-      AND NOT EXISTS (
-          SELECT 1
-          FROM   tbl_rejection_reasons rr
-          WHERE  rr.mobile_number = sp.mobile_number
-      );
-
-    -- -----------------------------------------------------------------------
-    -- Step 2: Latest scoring features per candidate.
-    --         One row per mobile_number (most recent date_created wins).
-    -- -----------------------------------------------------------------------
-    DROP TEMPORARY TABLE IF EXISTS _tmp_latest_sf;
-    CREATE TEMPORARY TABLE _tmp_latest_sf AS
-    SELECT sf.*
-    FROM (
-        SELECT sf2.*,
-               ROW_NUMBER() OVER (
-                   PARTITION BY sf2.mobile_number
-                   ORDER BY     sf2.date_created DESC
-               ) AS rn
-        FROM   tbl_scoring_features sf2
-        WHERE  sf2.mobile_number IN (SELECT mobile_number FROM _tmp_rr_cands)
-    ) sf
-    WHERE sf.rn = 1;
-
-    ALTER TABLE _tmp_latest_sf ADD INDEX idx_lsf_mobile (mobile_number);
-
-    -- -----------------------------------------------------------------------
-    -- Step 3: Unpivot scoring features into one row per feature per customer,
-    --         then select the feature with the highest score_gap (most points
-    --         lost vs. the theoretical maximum for that feature).
-    --
-    --   score_gap = score_max - score_actual
-    --   Highest score_gap = single biggest drag on the scorecard total.
-    -- -----------------------------------------------------------------------
-    DROP TEMPORARY TABLE IF EXISTS _tmp_all_feature_scores;
-    CREATE TEMPORARY TABLE _tmp_all_feature_scores AS
-    SELECT mobile_number, feature_name, feature_value, score_actual, score_max,
-           (score_max - score_actual) AS score_gap
-    FROM (
-
-        -- net_cnt_unq_sender_3m  (max 31, floor -10, range 41 -- highest weight)
-        SELECT mobile_number,
-               'net_cnt_unq_sender_3m'  AS feature_name,
-               net_cnt_unq_sender_3m    AS feature_value,
-               CASE
-                   WHEN net_cnt_unq_sender_3m <=  2.5 THEN -10
-                   WHEN net_cnt_unq_sender_3m  <  5.5 THEN   5
-                   WHEN net_cnt_unq_sender_3m  < 11.0 THEN  10
-                   WHEN net_cnt_unq_sender_3m  < 19.5 THEN  17
-                   WHEN net_cnt_unq_sender_3m  < 53.0 THEN  27
-                   ELSE 31
-               END AS score_actual,
-               31  AS score_max
-        FROM _tmp_latest_sf
-
-        UNION ALL
-
-        -- net_cashflow_6m  (max 31, floor -5, range 36)
-        SELECT mobile_number,
-               'net_cashflow_6m',
-               net_cashflow_6m,
-               CASE
-                   WHEN net_cashflow_6m <= -771.9 THEN -5
-                   WHEN net_cashflow_6m  < -160.6 THEN -1
-                   WHEN net_cashflow_6m  <  -18.5 THEN  0
-                   WHEN net_cashflow_6m  <    1.5 THEN 10
-                   WHEN net_cashflow_6m  <  225.6 THEN 17
-                   ELSE 31
-               END,
-               31
-        FROM _tmp_latest_sf
-
-        UNION ALL
-
-        -- flz_sum_amt_6m  (max 35, floor 8, range 27 -- highest absolute ceiling)
-        SELECT mobile_number,
-               'flz_sum_amt_6m',
-               flz_sum_amt_6m,
-               CASE
-                   WHEN flz_sum_amt_6m <= 10    THEN  8
-                   WHEN flz_sum_amt_6m  < 18000 THEN 18
-                   WHEN flz_sum_amt_6m  < 37140 THEN 28
-                   ELSE 35
-               END,
-               35
-        FROM _tmp_latest_sf
-
-        UNION ALL
-
-        -- kplc_paybills_cnt_trns_6m  (max 20, floor -5, range 25)
-        SELECT mobile_number,
-               'kplc_paybills_cnt_trns_6m',
-               kplc_paybills_cnt_trns_6m,
-               CASE
-                   WHEN kplc_paybills_cnt_trns_6m <= 0.5  THEN -5
-                   WHEN kplc_paybills_cnt_trns_6m  < 1.5  THEN  5
-                   WHEN kplc_paybills_cnt_trns_6m  < 5.5  THEN 10
-                   WHEN kplc_paybills_cnt_trns_6m  < 14.5 THEN 15
-                   ELSE 20
-               END,
-               20
-        FROM _tmp_latest_sf
-
-        UNION ALL
-
-        -- avg_bal_3m  (max 20, floor -3, range 23)
-        SELECT mobile_number,
-               'avg_bal_3m',
-               avg_bal_3m,
-               CASE
-                   WHEN avg_bal_3m <=   382.0 THEN -3
-                   WHEN avg_bal_3m  <   772.9 THEN  2
-                   WHEN avg_bal_3m  <  2179.0 THEN  7
-                   WHEN avg_bal_3m  < 19560.0 THEN 13
-                   ELSE 20
-               END,
-               20
-        FROM _tmp_latest_sf
-
-        UNION ALL
-
-        -- bet_cnt_trns_3m  (max 0, floor -20, range 20 -- pure negative impact)
-        SELECT mobile_number,
-               'bet_cnt_trns_3m',
-               bet_cnt_trns_3m,
-               CASE
-                   WHEN bet_cnt_trns_3m <= 0.5 THEN   0
-                   WHEN bet_cnt_trns_3m  < 1.5 THEN   5
-                   WHEN bet_cnt_trns_3m  < 8.5 THEN  -8
-                   ELSE -20
-               END,
-               0
-        FROM _tmp_latest_sf
-
-        UNION ALL
-
-        -- p2p_received_money_cnt_unq_trns_1m  (max 20, floor 2, range 18)
-        SELECT mobile_number,
-               'p2p_received_money_cnt_unq_trns_1m',
-               p2p_received_money_cnt_unq_trns_1m,
-               CASE
-                   WHEN p2p_received_money_cnt_unq_trns_1m <= 1.5 THEN  2
-                   WHEN p2p_received_money_cnt_unq_trns_1m  < 3.5 THEN 13
-                   ELSE 20
-               END,
-               20
-        FROM _tmp_latest_sf
-
-        UNION ALL
-
-        -- merch_sum_amt_3m  (max 20, floor 2, range 18)
-        SELECT mobile_number,
-               'merch_sum_amt_3m',
-               merch_sum_amt_3m,
-               CASE
-                   WHEN merch_sum_amt_3m <=  2020 THEN  2
-                   WHEN merch_sum_amt_3m  <  3676 THEN  5
-                   WHEN merch_sum_amt_3m  <  6071 THEN  8
-                   WHEN merch_sum_amt_3m  <  7366 THEN 10
-                   WHEN merch_sum_amt_3m  < 10660 THEN 16
-                   ELSE 20
-               END,
-               20
-        FROM _tmp_latest_sf
-
-        UNION ALL
-
-        -- all_send_money_sum_amt_3m  (max 20, floor 5, range 15)
-        SELECT mobile_number,
-               'all_send_money_sum_amt_3m',
-               all_send_money_sum_amt_3m,
-               CASE
-                   WHEN all_send_money_sum_amt_3m <=  19320 THEN  5
-                   WHEN all_send_money_sum_amt_3m  <  43460 THEN 10
-                   WHEN all_send_money_sum_amt_3m  <  56750 THEN 12
-                   WHEN all_send_money_sum_amt_3m  < 113900 THEN 15
-                   ELSE 20
-               END,
-               20
-        FROM _tmp_latest_sf
-
-        UNION ALL
-
-        -- all_received_money_sum_amt_3m  (max 20, floor 7, range 13)
-        SELECT mobile_number,
-               'all_received_money_sum_amt_3m',
-               all_received_money_sum_amt_3m,
-               CASE
-                   WHEN all_received_money_sum_amt_3m <=  29990 THEN  7
-                   WHEN all_received_money_sum_amt_3m  <  42480 THEN 10
-                   WHEN all_received_money_sum_amt_3m  <  50290 THEN 13
-                   WHEN all_received_money_sum_amt_3m  < 113800 THEN 15
-                   WHEN all_received_money_sum_amt_3m  < 192700 THEN 17
-                   ELSE 20
-               END,
-               20
-        FROM _tmp_latest_sf
-
-        UNION ALL
-
-        -- net_banked_6m  (max 20, floor 8, range 12)
-        SELECT mobile_number,
-               'net_banked_6m',
-               net_banked_6m,
-               CASE
-                   WHEN net_banked_6m <= -179000 THEN 20
-                   WHEN net_banked_6m  <  -80490 THEN 17
-                   WHEN net_banked_6m  <  -43620 THEN 14
-                   WHEN net_banked_6m  <  -16090 THEN 11
-                   WHEN net_banked_6m  <   -1650 THEN  9
-                   ELSE 8
-               END,
-               20
-        FROM _tmp_latest_sf
-
-    ) unpivoted;
-
-    ALTER TABLE _tmp_all_feature_scores ADD INDEX idx_afs_mobile (mobile_number);
-
-    -- -----------------------------------------------------------------------
-    -- Step 4: Keep only the worst feature per subscriber (highest score_gap;
-    --         ties broken by lowest score_actual).
-    -- -----------------------------------------------------------------------
-    DROP TEMPORARY TABLE IF EXISTS _tmp_worst_feature;
-    CREATE TEMPORARY TABLE _tmp_worst_feature AS
-    SELECT mobile_number, feature_name, feature_value,
-           score_actual, score_max, score_gap
-    FROM (
-        SELECT *,
-               ROW_NUMBER() OVER (
-                   PARTITION BY mobile_number
-                   ORDER BY score_gap DESC, score_actual ASC
-               ) AS rn
-        FROM _tmp_all_feature_scores
-    ) ranked
-    WHERE rn = 1;
-
-    ALTER TABLE _tmp_worst_feature ADD INDEX idx_wf_mobile (mobile_number);
-
-    -- =======================================================================
-    -- INSERTIONS  (most impactful reason first)
-    -- =======================================================================
 
     -- -----------------------------------------------------------------------
     -- Reason INSUFFICIENT_HISTORY (rank 1)
     --   Hard gate: no credit limit can be assigned until age_days >= 90.
+    --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
         (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
          feature_name, feature_value, score_actual, score_max, score_gap,
          repayment_probability)
+    WITH cands AS (
+        SELECT
+            sp.id                AS profile_id,
+            sp.mobile_number,
+            sp.age_days,
+            sp.three_month_wavg,
+            sp.turnover_segment,
+            sp.risk_segment,
+            sp.total_score,
+            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END AS has_hist_fail
+        FROM (
+            SELECT sp2.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY sp2.mobile_number
+                       ORDER BY     sp2.last_updated DESC
+                   ) AS rn
+            FROM   tbl_subscriber_profiles sp2
+            WHERE  sp2.model_category = 'not_qualified'
+        ) sp
+        WHERE sp.rn = 1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM   tbl_rejection_reasons rr
+              WHERE  rr.mobile_number = sp.mobile_number
+                AND  rr.reason_code   = 'INSUFFICIENT_HISTORY'
+          )
+    )
     SELECT
         c.mobile_number,
         c.profile_id,
@@ -309,20 +53,256 @@ BEGIN
         c.age_days,
         NULL, NULL, NULL,
         ROUND(100.0 / (1.0 + EXP(-(COALESCE(c.total_score, 0) - 100.0) / 35.0)), 2)
-    FROM  _tmp_rr_cands c
+    FROM  cands c
     WHERE c.age_days IS NULL OR c.age_days < 90;
 
     -- -----------------------------------------------------------------------
-    -- Reason WEAK_SCORING_FEATURE
-    --   The single derived feature that contributed the fewest points relative
-    --   to its theoretical maximum -- the lever with the most room to improve.
-    --
-    --   Rank = 1 when no history failure; rank = 2 when history also failed.
+    -- Reason WEAK_SCORING_FEATURE (rank 1 or 2)
+    --   The single scorecard feature with the highest score_gap (most points
+    --   lost vs. the theoretical maximum) - the lever with the most room to
+    --   improve.  Rank = 1 when no history failure; rank = 2 when history
+    --   also failed.
+    --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
         (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
          feature_name, feature_value, score_actual, score_max, score_gap,
          repayment_probability)
+    WITH cands AS (
+        SELECT
+            sp.id                AS profile_id,
+            sp.mobile_number,
+            sp.age_days,
+            sp.three_month_wavg,
+            sp.turnover_segment,
+            sp.risk_segment,
+            sp.total_score,
+            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END AS has_hist_fail
+        FROM (
+            SELECT sp2.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY sp2.mobile_number
+                       ORDER BY     sp2.last_updated DESC
+                   ) AS rn
+            FROM   tbl_subscriber_profiles sp2
+            WHERE  sp2.model_category = 'not_qualified'
+        ) sp
+        WHERE sp.rn = 1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM   tbl_rejection_reasons rr
+              WHERE  rr.mobile_number = sp.mobile_number
+                AND  rr.reason_code   = 'WEAK_SCORING_FEATURE'
+          )
+    ),
+    latest_sf AS (
+        SELECT sf.*
+        FROM (
+            SELECT sf2.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY sf2.mobile_number
+                       ORDER BY     sf2.date_created DESC
+                   ) AS rn
+            FROM   tbl_scoring_features sf2
+            WHERE  sf2.mobile_number IN (SELECT mobile_number FROM cands)
+        ) sf
+        WHERE sf.rn = 1
+    ),
+    all_feature_scores AS (
+        SELECT mobile_number, feature_name, feature_value, score_actual, score_max,
+               (score_max - score_actual) AS score_gap
+        FROM (
+
+            -- net_cnt_unq_sender_3m  (max 31, floor -10, range 41 - highest weight)
+            SELECT mobile_number,
+                   'net_cnt_unq_sender_3m' AS feature_name,
+                   net_cnt_unq_sender_3m   AS feature_value,
+                   CASE
+                       WHEN net_cnt_unq_sender_3m <=  2.5 THEN -10
+                       WHEN net_cnt_unq_sender_3m  <  5.5 THEN   5
+                       WHEN net_cnt_unq_sender_3m  < 11.0 THEN  10
+                       WHEN net_cnt_unq_sender_3m  < 19.5 THEN  17
+                       WHEN net_cnt_unq_sender_3m  < 53.0 THEN  27
+                       ELSE 31
+                   END AS score_actual,
+                   31  AS score_max
+            FROM latest_sf
+
+            UNION ALL
+
+            -- net_cashflow_6m  (max 31, floor -5, range 36)
+            SELECT mobile_number,
+                   'net_cashflow_6m',
+                   net_cashflow_6m,
+                   CASE
+                       WHEN net_cashflow_6m <= -771.9 THEN -5
+                       WHEN net_cashflow_6m  < -160.6 THEN -1
+                       WHEN net_cashflow_6m  <  -18.5 THEN  0
+                       WHEN net_cashflow_6m  <    1.5 THEN 10
+                       WHEN net_cashflow_6m  <  225.6 THEN 17
+                       ELSE 31
+                   END,
+                   31
+            FROM latest_sf
+
+            UNION ALL
+
+            -- flz_sum_amt_6m  (max 35, floor 8, range 27 - highest absolute ceiling)
+            SELECT mobile_number,
+                   'flz_sum_amt_6m',
+                   flz_sum_amt_6m,
+                   CASE
+                       WHEN flz_sum_amt_6m <= 10    THEN  8
+                       WHEN flz_sum_amt_6m  < 18000 THEN 18
+                       WHEN flz_sum_amt_6m  < 37140 THEN 28
+                       ELSE 35
+                   END,
+                   35
+            FROM latest_sf
+
+            UNION ALL
+
+            -- kplc_paybills_cnt_trns_6m  (max 20, floor -5, range 25)
+            SELECT mobile_number,
+                   'kplc_paybills_cnt_trns_6m',
+                   kplc_paybills_cnt_trns_6m,
+                   CASE
+                       WHEN kplc_paybills_cnt_trns_6m <= 0.5  THEN -5
+                       WHEN kplc_paybills_cnt_trns_6m  < 1.5  THEN  5
+                       WHEN kplc_paybills_cnt_trns_6m  < 5.5  THEN 10
+                       WHEN kplc_paybills_cnt_trns_6m  < 14.5 THEN 15
+                       ELSE 20
+                   END,
+                   20
+            FROM latest_sf
+
+            UNION ALL
+
+            -- avg_bal_3m  (max 20, floor -3, range 23)
+            SELECT mobile_number,
+                   'avg_bal_3m',
+                   avg_bal_3m,
+                   CASE
+                       WHEN avg_bal_3m <=   382.0 THEN -3
+                       WHEN avg_bal_3m  <   772.9 THEN  2
+                       WHEN avg_bal_3m  <  2179.0 THEN  7
+                       WHEN avg_bal_3m  < 19560.0 THEN 13
+                       ELSE 20
+                   END,
+                   20
+            FROM latest_sf
+
+            UNION ALL
+
+            -- bet_cnt_trns_3m  (max 0, floor -20, range 20 - pure negative impact)
+            SELECT mobile_number,
+                   'bet_cnt_trns_3m',
+                   bet_cnt_trns_3m,
+                   CASE
+                       WHEN bet_cnt_trns_3m <= 0.5 THEN   0
+                       WHEN bet_cnt_trns_3m  < 1.5 THEN   5
+                       WHEN bet_cnt_trns_3m  < 8.5 THEN  -8
+                       ELSE -20
+                   END,
+                   0
+            FROM latest_sf
+
+            UNION ALL
+
+            -- p2p_received_money_cnt_unq_trns_1m  (max 20, floor 2, range 18)
+            SELECT mobile_number,
+                   'p2p_received_money_cnt_unq_trns_1m',
+                   p2p_received_money_cnt_unq_trns_1m,
+                   CASE
+                       WHEN p2p_received_money_cnt_unq_trns_1m <= 1.5 THEN  2
+                       WHEN p2p_received_money_cnt_unq_trns_1m  < 3.5 THEN 13
+                       ELSE 20
+                   END,
+                   20
+            FROM latest_sf
+
+            UNION ALL
+
+            -- merch_sum_amt_3m  (max 20, floor 2, range 18)
+            SELECT mobile_number,
+                   'merch_sum_amt_3m',
+                   merch_sum_amt_3m,
+                   CASE
+                       WHEN merch_sum_amt_3m <=  2020 THEN  2
+                       WHEN merch_sum_amt_3m  <  3676 THEN  5
+                       WHEN merch_sum_amt_3m  <  6071 THEN  8
+                       WHEN merch_sum_amt_3m  <  7366 THEN 10
+                       WHEN merch_sum_amt_3m  < 10660 THEN 16
+                       ELSE 20
+                   END,
+                   20
+            FROM latest_sf
+
+            UNION ALL
+
+            -- all_send_money_sum_amt_3m  (max 20, floor 5, range 15)
+            SELECT mobile_number,
+                   'all_send_money_sum_amt_3m',
+                   all_send_money_sum_amt_3m,
+                   CASE
+                       WHEN all_send_money_sum_amt_3m <=  19320 THEN  5
+                       WHEN all_send_money_sum_amt_3m  <  43460 THEN 10
+                       WHEN all_send_money_sum_amt_3m  <  56750 THEN 12
+                       WHEN all_send_money_sum_amt_3m  < 113900 THEN 15
+                       ELSE 20
+                   END,
+                   20
+            FROM latest_sf
+
+            UNION ALL
+
+            -- all_received_money_sum_amt_3m  (max 20, floor 7, range 13)
+            SELECT mobile_number,
+                   'all_received_money_sum_amt_3m',
+                   all_received_money_sum_amt_3m,
+                   CASE
+                       WHEN all_received_money_sum_amt_3m <=  29990 THEN  7
+                       WHEN all_received_money_sum_amt_3m  <  42480 THEN 10
+                       WHEN all_received_money_sum_amt_3m  <  50290 THEN 13
+                       WHEN all_received_money_sum_amt_3m  < 113800 THEN 15
+                       WHEN all_received_money_sum_amt_3m  < 192700 THEN 17
+                       ELSE 20
+                   END,
+                   20
+            FROM latest_sf
+
+            UNION ALL
+
+            -- net_banked_6m  (max 20, floor 8, range 12)
+            SELECT mobile_number,
+                   'net_banked_6m',
+                   net_banked_6m,
+                   CASE
+                       WHEN net_banked_6m <= -179000 THEN 20
+                       WHEN net_banked_6m  <  -80490 THEN 17
+                       WHEN net_banked_6m  <  -43620 THEN 14
+                       WHEN net_banked_6m  <  -16090 THEN 11
+                       WHEN net_banked_6m  <   -1650 THEN  9
+                       ELSE 8
+                   END,
+                   20
+            FROM latest_sf
+
+        ) unpivoted
+    ),
+    worst_feature AS (
+        SELECT mobile_number, feature_name, feature_value,
+               score_actual, score_max, score_gap
+        FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY mobile_number
+                       ORDER BY score_gap DESC, score_actual ASC
+                   ) AS rn
+            FROM all_feature_scores
+        ) ranked
+        WHERE rn = 1
+    )
     SELECT
         c.mobile_number,
         c.profile_id,
@@ -355,11 +335,11 @@ BEGIN
         wf.score_max,
         wf.score_gap,
         ROUND(100.0 / (1.0 + EXP(-(COALESCE(c.total_score, 0) - 100.0) / 35.0)), 2)
-    FROM  _tmp_rr_cands    c
-    JOIN  _tmp_worst_feature wf ON wf.mobile_number = c.mobile_number;
+    FROM  cands c
+    JOIN  worst_feature wf ON wf.mobile_number = c.mobile_number;
 
     -- -----------------------------------------------------------------------
-    -- Reason LOW_TURNOVER
+    -- Reason LOW_TURNOVER (rank 2 or 3)
     --   Applies when age_days >= 90, risk_segment >= 3, but turnover_segment
     --   is still below the minimum required to qualify at that risk level.
     --
@@ -370,11 +350,39 @@ BEGIN
     --     risk_segment = 6  -> need turnover_segment >= 4
     --     risk_segment = 7  -> need turnover_segment >= 3
     --     risk_segment = 8  -> need turnover_segment >= 2
+    --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
         (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
          feature_name, feature_value, score_actual, score_max, score_gap,
          repayment_probability)
+    WITH cands AS (
+        SELECT
+            sp.id                AS profile_id,
+            sp.mobile_number,
+            sp.age_days,
+            sp.three_month_wavg,
+            sp.turnover_segment,
+            sp.risk_segment,
+            sp.total_score,
+            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END AS has_hist_fail
+        FROM (
+            SELECT sp2.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY sp2.mobile_number
+                       ORDER BY     sp2.last_updated DESC
+                   ) AS rn
+            FROM   tbl_subscriber_profiles sp2
+            WHERE  sp2.model_category = 'not_qualified'
+        ) sp
+        WHERE sp.rn = 1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM   tbl_rejection_reasons rr
+              WHERE  rr.mobile_number = sp.mobile_number
+                AND  rr.reason_code   = 'LOW_TURNOVER'
+          )
+    )
     SELECT
         c.mobile_number,
         c.profile_id,
@@ -401,7 +409,7 @@ BEGIN
         c.three_month_wavg,
         NULL, NULL, NULL,
         ROUND(100.0 / (1.0 + EXP(-(COALESCE(c.total_score, 0) - 100.0) / 35.0)), 2)
-    FROM  _tmp_rr_cands c
+    FROM  cands c
     WHERE (c.age_days IS NULL OR c.age_days >= 90)
       AND c.risk_segment >= 3
       AND c.turnover_segment <
@@ -416,15 +424,43 @@ BEGIN
           END;
 
     -- -----------------------------------------------------------------------
-    -- Reason HIGH_CREDIT_RISK
+    -- Reason HIGH_CREDIT_RISK (rank 2 or 3)
     --   Applies when age_days >= 90 but risk_segment <= 2.
     --   No achievable turnover level can qualify this subscriber; the risk
     --   score itself must improve before any limit can be granted.
+    --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
         (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
          feature_name, feature_value, score_actual, score_max, score_gap,
          repayment_probability)
+    WITH cands AS (
+        SELECT
+            sp.id                AS profile_id,
+            sp.mobile_number,
+            sp.age_days,
+            sp.three_month_wavg,
+            sp.turnover_segment,
+            sp.risk_segment,
+            sp.total_score,
+            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END AS has_hist_fail
+        FROM (
+            SELECT sp2.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY sp2.mobile_number
+                       ORDER BY     sp2.last_updated DESC
+                   ) AS rn
+            FROM   tbl_subscriber_profiles sp2
+            WHERE  sp2.model_category = 'not_qualified'
+        ) sp
+        WHERE sp.rn = 1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM   tbl_rejection_reasons rr
+              WHERE  rr.mobile_number = sp.mobile_number
+                AND  rr.reason_code   = 'HIGH_CREDIT_RISK'
+          )
+    )
     SELECT
         c.mobile_number,
         c.profile_id,
@@ -441,16 +477,10 @@ BEGIN
         c.total_score,
         NULL, NULL, NULL,
         ROUND(100.0 / (1.0 + EXP(-(COALESCE(c.total_score, 0) - 100.0) / 35.0)), 2)
-    FROM  _tmp_rr_cands c
+    FROM  cands c
     WHERE (c.age_days IS NULL OR c.age_days >= 90)
       AND c.risk_segment <= 2;
 
-    -- -----------------------------------------------------------------------
-    -- Cleanup
-    -- -----------------------------------------------------------------------
-    DROP TEMPORARY TABLE IF EXISTS _tmp_rr_cands;
-    DROP TEMPORARY TABLE IF EXISTS _tmp_latest_sf;
-    DROP TEMPORARY TABLE IF EXISTS _tmp_all_feature_scores;
-    DROP TEMPORARY TABLE IF EXISTS _tmp_worst_feature;
+END$$
 
-END
+DELIMITER ;

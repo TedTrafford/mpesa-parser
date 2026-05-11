@@ -136,8 +136,23 @@ def _deploy_all_procedures(conn) -> None:
 
     for filename in sql_files:
         sql_path = os.path.join(_PROCEDURES_DIR, filename)
-        with open(sql_path, "r", encoding="utf-8") as fh:
+        with open(sql_path, "r", encoding="utf-8", errors="replace") as fh:
             proc_sql = fh.read().strip()
+
+        # Strip DELIMITER directives — DELIMITER is a client-only concept;
+        # the MySQL server protocol does not understand it.  Detect the custom
+        # delimiter declared in the file (e.g. $$), remove all DELIMITER lines,
+        # then strip the trailing custom terminator from the procedure body so
+        # that the CREATE PROCEDURE...END block is sent as a clean single statement.
+        _delim_match = re.search(
+            r"^\s*DELIMITER\s+(\S+)\s*$", proc_sql, re.IGNORECASE | re.MULTILINE
+        )
+        if _delim_match:
+            _custom_delim = re.escape(_delim_match.group(1))
+            proc_sql = re.sub(
+                r"^\s*DELIMITER\s+\S+\s*$", "", proc_sql, flags=re.IGNORECASE | re.MULTILINE
+            )
+            proc_sql = re.sub(_custom_delim + r"\s*$", "", proc_sql.rstrip())
 
         # Strip DEFINER clause.
         proc_sql = re.sub(
