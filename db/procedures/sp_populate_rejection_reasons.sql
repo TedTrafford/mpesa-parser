@@ -57,11 +57,76 @@ BEGIN
     WHERE c.age_days IS NULL OR c.age_days < 90;
 
     -- -----------------------------------------------------------------------
-    -- Reason WEAK_SCORING_FEATURE (rank 1 or 2)
+    -- Reason HIGH_DEBT_TO_INCOME (rank 1 or 2)
+    --   Hard gate: debt-to-income ratio > 50 % (lender inflows account for
+    --   more than half of all M-PESA inflows over the last 6 months).
+    --   fly_profiling() already forces model_category = 'not_qualified' and
+    --   credit_limit = 0 before writing the profile row, so this procedure
+    --   only needs to surface the human-readable explanation.
+    --   Rank = 1 when no history failure; rank = 2 when history also failed.
+    --   Idempotent: skips any subscriber that already has this reason_code.
+    -- -----------------------------------------------------------------------
+    INSERT INTO tbl_rejection_reasons
+        (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
+         feature_name, feature_value, score_actual, score_max, score_gap,
+         repayment_probability)
+    WITH cands AS (
+        SELECT
+            sp.id                AS profile_id,
+            sp.mobile_number,
+            sp.age_days,
+            sp.total_score,
+            sp.total_inflow,
+            sp.lender_inflow,
+            sp.debt_to_income_ratio,
+            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END AS has_hist_fail
+        FROM (
+            SELECT sp2.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY sp2.mobile_number
+                       ORDER BY     sp2.last_updated DESC
+                   ) AS rn
+            FROM   tbl_subscriber_profiles sp2
+            WHERE  sp2.model_category = 'not_qualified'
+        ) sp
+        WHERE sp.rn = 1
+          AND sp.debt_to_income_ratio > 0.5000
+          AND NOT EXISTS (
+              SELECT 1
+              FROM   tbl_rejection_reasons rr
+              WHERE  rr.mobile_number = sp.mobile_number
+                AND  rr.reason_code   = 'HIGH_DEBT_TO_INCOME'
+          )
+    )
+    SELECT
+        c.mobile_number,
+        c.profile_id,
+        1 + c.has_hist_fail,
+        'HIGH_DEBT_TO_INCOME',
+        CONCAT(
+            'Debt-to-income ratio is ',
+            ROUND(c.debt_to_income_ratio * 100, 1),
+            '% — digital-lender inflows (KES ',
+            ROUND(COALESCE(c.lender_inflow, 0), 2),
+            ') represent more than 50% of total M-PESA inflows (KES ',
+            ROUND(COALESCE(c.total_inflow, 0), 2),
+            ') over the last 6 months. ',
+            'Customers whose inflows are predominantly loan disbursements are ',
+            'ineligible for a credit limit until the ratio falls below 50%.'
+        ),
+        'debt_to_income_ratio',
+        c.debt_to_income_ratio,
+        NULL, NULL, NULL,
+        ROUND(100.0 / (1.0 + EXP(-(COALESCE(c.total_score, 0) - 100.0) / 35.0)), 2)
+    FROM  cands c;
+
+    -- -----------------------------------------------------------------------
+    -- Reason WEAK_SCORING_FEATURE (rank 1, 2, or 3)
     --   The single scorecard feature with the highest score_gap (most points
     --   lost vs. the theoretical maximum) - the lever with the most room to
-    --   improve.  Rank = 1 when no history failure; rank = 2 when history
-    --   also failed.
+    --   improve.  Rank increments by 1 for each active hard gate:
+    --     +1 if INSUFFICIENT_HISTORY (age_days < 90)
+    --     +1 if HIGH_DEBT_TO_INCOME  (debt_to_income_ratio > 50 %)
     --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
@@ -77,7 +142,8 @@ BEGIN
             sp.turnover_segment,
             sp.risk_segment,
             sp.total_score,
-            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END AS has_hist_fail
+            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END        AS has_hist_fail,
+            CASE WHEN sp.debt_to_income_ratio > 0.5000        THEN 1 ELSE 0 END        AS has_dti_fail
         FROM (
             SELECT sp2.*,
                    ROW_NUMBER() OVER (
@@ -306,7 +372,7 @@ BEGIN
     SELECT
         c.mobile_number,
         c.profile_id,
-        1 + c.has_hist_fail,
+        1 + c.has_hist_fail + c.has_dti_fail,
         'WEAK_SCORING_FEATURE',
         CONCAT(
             'Scorecard feature "',
@@ -339,9 +405,12 @@ BEGIN
     JOIN  worst_feature wf ON wf.mobile_number = c.mobile_number;
 
     -- -----------------------------------------------------------------------
-    -- Reason LOW_TURNOVER (rank 2 or 3)
+    -- Reason LOW_TURNOVER (rank 2, 3, or 4)
     --   Applies when age_days >= 90, risk_segment >= 3, but turnover_segment
     --   is still below the minimum required to qualify at that risk level.
+    --   Rank increments by 1 for each active hard gate above it:
+    --     +1 if INSUFFICIENT_HISTORY (age_days < 90)
+    --     +1 if HIGH_DEBT_TO_INCOME  (debt_to_income_ratio > 50 %)
     --
     --   Qualification thresholds (from fly_profiling model_category logic):
     --     risk_segment = 3  -> need turnover_segment >= 7
@@ -365,7 +434,8 @@ BEGIN
             sp.turnover_segment,
             sp.risk_segment,
             sp.total_score,
-            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END AS has_hist_fail
+            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END        AS has_hist_fail,
+            CASE WHEN sp.debt_to_income_ratio > 0.5000        THEN 1 ELSE 0 END        AS has_dti_fail
         FROM (
             SELECT sp2.*,
                    ROW_NUMBER() OVER (
@@ -386,7 +456,7 @@ BEGIN
     SELECT
         c.mobile_number,
         c.profile_id,
-        2 + c.has_hist_fail,
+        2 + c.has_hist_fail + c.has_dti_fail,
         'LOW_TURNOVER',
         CONCAT(
             'Three-month weighted average turnover (KES ',
@@ -424,10 +494,13 @@ BEGIN
           END;
 
     -- -----------------------------------------------------------------------
-    -- Reason HIGH_CREDIT_RISK (rank 2 or 3)
+    -- Reason HIGH_CREDIT_RISK (rank 2, 3, or 4)
     --   Applies when age_days >= 90 but risk_segment <= 2.
     --   No achievable turnover level can qualify this subscriber; the risk
     --   score itself must improve before any limit can be granted.
+    --   Rank increments by 1 for each active hard gate above it:
+    --     +1 if INSUFFICIENT_HISTORY (age_days < 90)
+    --     +1 if HIGH_DEBT_TO_INCOME  (debt_to_income_ratio > 50 %)
     --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
@@ -443,7 +516,8 @@ BEGIN
             sp.turnover_segment,
             sp.risk_segment,
             sp.total_score,
-            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END AS has_hist_fail
+            CASE WHEN sp.age_days IS NULL OR sp.age_days < 90 THEN 1 ELSE 0 END        AS has_hist_fail,
+            CASE WHEN sp.debt_to_income_ratio > 0.5000        THEN 1 ELSE 0 END        AS has_dti_fail
         FROM (
             SELECT sp2.*,
                    ROW_NUMBER() OVER (
@@ -464,7 +538,7 @@ BEGIN
     SELECT
         c.mobile_number,
         c.profile_id,
-        2 + c.has_hist_fail,
+        2 + c.has_hist_fail + c.has_dti_fail,
         'HIGH_CREDIT_RISK',
         CONCAT(
             'Total scorecard score is ', COALESCE(c.total_score, 0),
