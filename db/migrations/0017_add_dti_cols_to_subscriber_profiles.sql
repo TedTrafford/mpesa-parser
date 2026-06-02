@@ -22,7 +22,7 @@ ALTER TABLE `tbl_subscriber_profiles`
         COMMENT 'KES sum of inflows matched to known digital lenders in last 6 months'
         AFTER `total_inflow`,
     ADD COLUMN `debt_to_income_ratio`      DECIMAL(7, 4)   DEFAULT NULL
-        COMMENT 'lender_inflow / total_inflow; NULL when total_inflow = 0'
+        COMMENT 'lender_inflow / total_inflow (NULL when total_inflow = 0)'
         AFTER `lender_inflow`,
     ADD COLUMN `total_inflow_txn_count`    BIGINT          DEFAULT NULL
         COMMENT 'Count of all positive M-PESA transactions in last 6 months'
