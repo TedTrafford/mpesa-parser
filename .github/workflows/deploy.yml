@@ -1,24 +1,35 @@
 name: Deploy to Production
 
-# Triggers whenever a push lands on main (i.e. a PR is merged).
-# Enforce that CI passes first via branch-protection rules requiring the
-# "CI / Lint & Test" status checks before a PR can be merged.
+# Triggers whenever a commit lands on main — i.e. when a branch is merged
+# into main via a pull request (or a direct push to main).
+#
+# Recommended: protect the `main` branch and require the "CI / Lint & Test"
+# status checks to pass before a PR can be merged, so only tested code is
+# ever deployed.
 on:
   push:
     branches:
       - main
   workflow_dispatch:   # allows manual trigger from the Actions tab
 
+# Make sure two deploys never run at the same time. A newer push cancels an
+# in-flight deploy of older code.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  PROD_HOST: "65.20.86.247"   # production server
+
 jobs:
   deploy:
-    name: SSH Deploy to 139.84.243.180
+    name: SSH Deploy to 65.20.86.247
     runs-on: ubuntu-latest
 
     steps:
       - name: Verify required secrets are set
         run: |
           missing=()
-          [[ -z "$SSH_HOST"        ]] && missing+=(SSH_HOST)
           [[ -z "$SSH_USER"        ]] && missing+=(SSH_USER)
           [[ -z "$SSH_PRIVATE_KEY" ]] && missing+=(SSH_PRIVATE_KEY)
           if [[ ${#missing[@]} -gt 0 ]]; then
@@ -27,15 +38,14 @@ jobs:
             exit 1
           fi
         env:
-          SSH_HOST:        ${{ secrets.SSH_HOST }}
           SSH_USER:        ${{ secrets.SSH_USER }}
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.SSH_HOST }}
+          host: ${{ env.PROD_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
+          port: ${{ secrets.SSH_PORT || 22 }}
           script: bash /var/www/server/parser/scripts/server-deploy.sh

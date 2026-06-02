@@ -1,5 +1,0 @@
--- =============================================================================
--- Migration 0016: Create tbl_rejection_reasons + sp_populate_rejection_reasons
--- Description   : Explains why a subscriber was rated not_qualified, ordered
---                 from the most impactful gate to the least:
---

@@ -107,25 +107,58 @@ def _mysql_error_code(exc: Exception) -> Optional[int]:
 def _split_statements(sql_text: str) -> List[str]:
     """Split *sql_text* into individual executable statements.
 
-    Strips single-line ``--`` comments then splits on ``;``.  Sufficient for
-    the straightforward DDL/DML in the migrations folder -- does not handle
-    stored-procedure bodies or DELIMITER overrides (those live in
-    db/procedures/ and are deployed separately).
+    Strips single-line ``--`` comments then splits on ``;`` that fall outside
+    single-quoted string literals (so semicolons inside COMMENT text are safe).
+    Does not handle stored-procedure bodies or DELIMITER overrides (those live
+    in db/procedures/ and are deployed separately).
     """
     lines = []  # type: List[str]
     for line in sql_text.splitlines():
         if "--" in line:
             line = line[: line.index("--")]
         lines.append(line)
-    statements = [s.strip() for s in "\n".join(lines).split(";")]
-    return [s for s in statements if s]
+    text = "\n".join(lines)
+
+    statements = []  # type: List[str]
+    current = []  # type: List[str]
+    in_string = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "'" and not in_string:
+            in_string = True
+            current.append(ch)
+        elif ch == "'" and in_string:
+            if i + 1 < len(text) and text[i + 1] == "'":
+                current.append("''")
+                i += 1
+            else:
+                in_string = False
+                current.append(ch)
+        elif ch == ";" and not in_string:
+            stmt = "".join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+
+    stmt = "".join(current).strip()
+    if stmt:
+        statements.append(stmt)
+    return statements
 
 
 def _migration_files() -> List[str]:
     """Return sorted list of .sql filenames from the migrations directory."""
     if not os.path.isdir(MIGRATIONS_DIR):
         return []
-    return sorted(f for f in os.listdir(MIGRATIONS_DIR) if f.endswith(".sql"))
+    return sorted(
+        f
+        for f in os.listdir(MIGRATIONS_DIR)
+        if f.endswith(".sql") and f[0].isdigit()
+    )
 
 
 def _applied_versions(conn) -> Set[str]:

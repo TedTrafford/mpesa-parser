@@ -3,17 +3,24 @@ CREATE DEFINER=`staging`@`%` PROCEDURE `Data_Science`.`fly_profiling`(
 )
 BEGIN
 
-    DECLARE update_check      DOUBLE   DEFAULT NULL;
-    DECLARE month1            DOUBLE   DEFAULT NULL;
-    DECLARE month2            DOUBLE   DEFAULT NULL;
-    DECLARE month3            DOUBLE   DEFAULT NULL;
-    DECLARE age_days          DOUBLE   DEFAULT NULL;
-    DECLARE three_month_wavg  DOUBLE   DEFAULT NULL;
-    DECLARE var_credit_limit  INT      DEFAULT 0;
-    DECLARE risk_score        DOUBLE   DEFAULT NULL;
-    DECLARE risk_segment      BIGINT   DEFAULT 0;
-    DECLARE model_category    TEXT     DEFAULT NULL;
-    DECLARE turnover_segment  DOUBLE   DEFAULT 0;
+    DECLARE update_check              DOUBLE   DEFAULT NULL;
+    DECLARE month1                    DOUBLE   DEFAULT NULL;
+    DECLARE month2                    DOUBLE   DEFAULT NULL;
+    DECLARE month3                    DOUBLE   DEFAULT NULL;
+    DECLARE age_days                  DOUBLE   DEFAULT NULL;
+    DECLARE three_month_wavg          DOUBLE   DEFAULT NULL;
+    DECLARE var_credit_limit          INT      DEFAULT 0;
+    DECLARE risk_score                DOUBLE   DEFAULT NULL;
+    DECLARE risk_segment              BIGINT   DEFAULT 0;
+    DECLARE model_category            TEXT     DEFAULT NULL;
+    DECLARE turnover_segment          DOUBLE   DEFAULT 0;
+
+    -- DTI variables (6-month window, digital-lender dictionary)
+    DECLARE var_total_inflow              DOUBLE   DEFAULT NULL;
+    DECLARE var_lender_inflow             DOUBLE   DEFAULT NULL;
+    DECLARE var_debt_to_income_ratio      DOUBLE   DEFAULT NULL;
+    DECLARE var_total_inflow_txn_count    BIGINT   DEFAULT 0;
+    DECLARE var_lender_inflow_txn_count   BIGINT   DEFAULT 0;
 
     DECLARE CONTINUE HANDLER FOR NOT FOUND BEGIN END;
 
@@ -70,6 +77,88 @@ BEGIN
         FROM   tbl_raw_mpesa_statements
         WHERE  mobile_number = ip_mobile_number
     );
+
+    -- -------------------------------------------------------------------------
+    -- Debt-to-income ratio (6-month window)
+    -- Classify each positive transaction against the digital-lender dictionary
+    -- in a single table scan; derive the ratio from the aggregates.
+    -- -------------------------------------------------------------------------
+    SELECT
+        COALESCE(SUM(amount),                                    0),
+        COALESCE(SUM(CASE WHEN is_lender THEN amount ELSE 0 END), 0),
+        COUNT(*),
+        COALESCE(SUM(CASE WHEN is_lender THEN 1     ELSE 0 END), 0)
+    INTO
+        var_total_inflow,
+        var_lender_inflow,
+        var_total_inflow_txn_count,
+        var_lender_inflow_txn_count
+    FROM (
+        SELECT
+            amount,
+            (    details LIKE '%overdraft of credit party%'
+              OR details LIKE '%m-pesa overdraw%'
+              OR details LIKE '%od loan%'
+              OR details LIKE '%tala loan%'
+              OR details LIKE '%branch microfinance%'
+              OR details LIKE '%zenka digital%'
+              OR details LIKE '%timiza%'
+              OR details LIKE '%m-kopa%'
+              OR details LIKE '%h- fund%'
+              OR details LIKE '%h-fund%'
+              OR details LIKE '%hustler fund%'
+              OR details LIKE '%hfund savings%'
+              OR details LIKE '%term loan disbursement%'
+              OR details LIKE '%loop b2c%'
+              OR details LIKE '%loop business%'
+              OR details LIKE '%zash loan%'
+              OR details LIKE '%zillions credit%'
+              OR details LIKE '%chelete credit%'
+              OR details LIKE '%payablu credit%'
+              OR details LIKE '%chapeo capital%'
+              OR details LIKE '%creditarea capital%'
+              OR details LIKE '%loan plus digital%'
+              OR details LIKE '%simplepay capital%'
+              OR details LIKE '%ceres tech%'
+              OR details LIKE '%zamaradi capital%'
+              OR details LIKE '%fourth generation capital%'
+              OR details LIKE '%mular credit%'
+              OR details LIKE '%ajax credit%'
+              OR details LIKE '%mkulimapay credit%'
+              OR details LIKE '%risine credit%'
+              OR details LIKE '%pesa kuu credit%'
+              OR details LIKE '%goldstep capital%'
+              OR details LIKE '%azura credit%'
+              OR details LIKE '%flashpesa%'
+              OR details LIKE '%impala credit%'
+              OR details LIKE '%platinum credit%'
+              OR details LIKE '%bytech credit%'
+              OR details LIKE '%getcash capital%'
+              OR details LIKE '%milestone credit%'
+              OR details LIKE '%marble capital%'
+              OR details LIKE '%sure cred capital%'
+              OR details LIKE '%finberry capital%'
+              OR details LIKE '%inspire credit%'
+              OR details LIKE '%fast credit%'
+              OR details LIKE '%brisk credit%'
+              OR details LIKE '%okash%'
+              OR details LIKE '%mshwari%'
+              OR details LIKE '%fairmoney%'
+              OR details LIKE '%ipesa%'
+              OR details LIKE '%kopesh%'
+              OR details LIKE '%lendplus%'
+              OR details LIKE '%opesa%'
+            ) AS is_lender
+        FROM tbl_raw_mpesa_statements
+        WHERE mobile_number     = ip_mobile_number
+          AND amount            > 0
+          AND transaction_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+    ) dti_src;
+
+    SET var_debt_to_income_ratio = CASE
+        WHEN var_total_inflow IS NULL OR var_total_inflow = 0 THEN NULL
+        ELSE ROUND(var_lender_inflow / var_total_inflow, 4)
+    END;
 
     SET three_month_wavg = (
         (COALESCE(month1, 0) * 3 +
@@ -342,17 +431,30 @@ BEGIN
         ELSE 'not_qualified'
     END;
 
+    -- -------------------------------------------------------------------------
+    -- Hard gate: customers with debt-to-income ratio > 50 % are rejected
+    -- regardless of scorecard outcome.  Credit limit is forced to zero.
+    -- -------------------------------------------------------------------------
+    IF var_debt_to_income_ratio IS NOT NULL AND var_debt_to_income_ratio > 0.5000 THEN
+        SET model_category   = 'not_qualified';
+        SET var_credit_limit = 0;
+    END IF;
+
     IF update_check = ip_mobile_number THEN
 
         INSERT INTO tbl_subscriber_profiles
             (mobile_number, last_updated,
              month1_turnover, month2_turnover, month3_turnover,
              age_days, three_month_wavg,
-             risk_segment, turnover_segment, credit_limit, total_score, model_category)
+             risk_segment, turnover_segment, credit_limit, total_score, model_category,
+             total_inflow, lender_inflow, debt_to_income_ratio,
+             total_inflow_txn_count, lender_inflow_txn_count)
         VALUES
             (ip_mobile_number, NOW(),
              month1, month2, month3, age_days, three_month_wavg,
-             risk_segment, turnover_segment, var_credit_limit, risk_score, model_category);
+             risk_segment, turnover_segment, var_credit_limit, risk_score, model_category,
+             var_total_inflow, var_lender_inflow, var_debt_to_income_ratio,
+             var_total_inflow_txn_count, var_lender_inflow_txn_count);
 
         DELETE FROM customer_credit_limit
         WHERE  mobile_number = ip_mobile_number;
@@ -368,11 +470,15 @@ BEGIN
             (mobile_number, last_updated,
              month1_turnover, month2_turnover, month3_turnover,
              age_days, three_month_wavg,
-             risk_segment, turnover_segment, credit_limit, total_score, model_category)
+             risk_segment, turnover_segment, credit_limit, total_score, model_category,
+             total_inflow, lender_inflow, debt_to_income_ratio,
+             total_inflow_txn_count, lender_inflow_txn_count)
         VALUES
             (ip_mobile_number, NOW(),
              month1, month2, month3, age_days, three_month_wavg,
-             risk_segment, turnover_segment, var_credit_limit, risk_score, model_category);
+             risk_segment, turnover_segment, var_credit_limit, risk_score, model_category,
+             var_total_inflow, var_lender_inflow, var_debt_to_income_ratio,
+             var_total_inflow_txn_count, var_lender_inflow_txn_count);
 
         INSERT INTO customer_credit_limit
             (mobile_number, credit_limit, profiling_date, profiling_category)
