@@ -7,7 +7,8 @@
 # Assumptions:
 #   - The repo is cloned at /var/www/server/parser (parse_single.py is at
 #     /var/www/server/parser/parse_single.py).
-#   - A virtualenv exists at /var/www/server/parser/.venv
+#   - A virtualenv at /var/www/server/parser/.venv is created automatically if
+#     missing (requires python3-venv on Ubuntu).
 #   - The .env file with real credentials lives at /var/www/server/parser/.env
 #     and is NOT tracked by git.
 # ---------------------------------------------------------------------------
@@ -32,7 +33,7 @@ git checkout main
 git reset --hard origin/main
 echo "  HEAD is now at: $(git rev-parse --short HEAD) -- $(git log -1 --pretty=%s)"
 
-# -- 2. Activate virtualenv and sync dependencies ----------------------------
+# -- 2. Ensure virtualenv exists and sync dependencies -----------------------
 echo ""
 echo "[2/4] Syncing Python dependencies..."
 
@@ -41,9 +42,13 @@ if [ -f "$DEPLOY_PATH/.venv/bin/activate" ]; then
 elif [ -f "$DEPLOY_PATH/venv/bin/activate" ]; then
     VENV_ACTIVATE="$DEPLOY_PATH/venv/bin/activate"
 else
-    echo "  ERROR: no virtualenv found at $DEPLOY_PATH/.venv or $DEPLOY_PATH/venv"
-    echo "  Run the initial-setup instructions to create one."
-    exit 1
+    echo "  No virtualenv found — creating $DEPLOY_PATH/.venv ..."
+    if ! python3 -m venv "$DEPLOY_PATH/.venv"; then
+        echo "  ERROR: could not create virtualenv."
+        echo "  On Ubuntu install the venv module: apt install -y python3-venv python3-pip"
+        exit 1
+    fi
+    VENV_ACTIVATE="$DEPLOY_PATH/.venv/bin/activate"
 fi
 
 # shellcheck source=/dev/null
