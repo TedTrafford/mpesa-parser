@@ -74,7 +74,8 @@ Each transaction row extracted from the PDF is deduplicated against the database
 │   │   ├── 0013_add_extracted_phone_to_logs.sql
 │   │   ├── 0014_fix_customer_credit_limit_types.sql
 │   │   ├── 0015_fix_customer_credit_limit_data.sql
-│   │   └── 0016_create_tbl_rejection_reasons.sql
+│   │   ├── 0016_create_tbl_rejection_reasons.sql
+│   │   └── 0017_add_dti_cols_to_subscriber_profiles.sql
 │   └── procedures/
 │       ├── fly_profiling.sql                    # Credit-scoring stored procedure
 │       └── sp_populate_rejection_reasons.sql    # Rejection reason analysis procedure
@@ -88,8 +89,8 @@ Each transaction row extracted from the PDF is deduplicated against the database
 ├── .env.example                   # Environment variable template
 ├── Makefile                       # Local dev helpers
 └── .github/workflows/
-    ├── ci.yml                     # Lint + test on every PR
-    └── deploy.yml                 # SSH deploy to production on merge to main
+    ├── ci.yml                     # Lint + test on every push and PR
+    └── deploy.yml                 # SSH deploy to 65.20.86.247 on merge to main
 ```
 
 ---
@@ -234,7 +235,7 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 | `tbl_raw_mpesa_statements` | All parsed M-PESA transactions. Unique on `(receipt_no, amount)`. |
 | `tbl_file_processing_logs` | Audit log for every PDF parse job — status, row counts, phone validation, profiling outcome. |
 | `tbl_scoring_features` | 18 engineered features computed by `fly_profiling()` per customer. |
-| `tbl_subscriber_profiles` | Risk segment, turnover segment, and credit limit output per customer. |
+| `tbl_subscriber_profiles` | Risk segment, turnover segment, credit limit, and debt-to-income (DTI) metrics per customer. |
 | `customer_credit_limit` | Latest approved credit limit per mobile number (maintained by `fly_profiling()`). |
 | `tbl_rejection_reasons` | Ranked rejection reasons for every `not_qualified` subscriber (see [Rejection reasons](#rejection-reasons)). |
 | `schema_migrations` | Tracks which migration files have been applied and when. |
@@ -249,6 +250,18 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 | `profiling_category` | `VARCHAR(20)` | `FTB1` (new customer) or `FTB2` (returning customer) |
 
 > **Note:** Early deployments stored `mobile_number` and `credit_limit` as `DECIMAL(18,4)`, causing values to display with thousands-separator commas (e.g. `254,722,123,456.0000`). Migrations `0014` and `0015` correct this automatically — `0015` also strips any `.0000` decimal artefacts left in existing rows after the column type change.
+
+### Key columns — `tbl_subscriber_profiles` (DTI, migration `0017`)
+
+| Column | Type | Notes |
+|---|---|---|
+| `total_inflow` | `DOUBLE` | KES sum of all positive M-PESA transactions in the last 6 months |
+| `lender_inflow` | `DOUBLE` | KES sum of inflows matched to known digital lenders (6 months) |
+| `debt_to_income_ratio` | `DECIMAL(7,4)` | `lender_inflow / total_inflow`; `NULL` when `total_inflow = 0` |
+| `total_inflow_txn_count` | `BIGINT` | Count of positive transactions in the 6-month window |
+| `lender_inflow_txn_count` | `BIGINT` | Count of digital-lender inflow transactions in the 6-month window |
+
+Subscribers with `debt_to_income_ratio > 0.50` (50 %) are hard-gated to `not_qualified` by `fly_profiling()` regardless of scorecard outcome.
 
 ### Key columns — `tbl_rejection_reasons`
 
@@ -271,6 +284,7 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 | Code | Condition | Rank |
 |---|---|---|
 | `INSUFFICIENT_HISTORY` | `age_days < 90` — hard gate; no limit possible regardless of score | 1 |
+| `HIGH_DEBT_TO_INCOME` | `debt_to_income_ratio > 50 %` — digital-lender inflows dominate total inflows | 1 or 2 |
 | `WEAK_SCORING_FEATURE` | The single scorecard feature with the highest score gap (most points lost vs. maximum) | 1 or 2 |
 | `LOW_TURNOVER` | `turnover_segment` below the minimum required for the subscriber's `risk_segment` | 2 or 3 |
 | `HIGH_CREDIT_RISK` | `risk_segment ≤ 2` — score so low no achievable turnover level can qualify the subscriber | 2 or 3 |
@@ -279,13 +293,16 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 
 ## Migrations
 
-Migration files live in `db/migrations/` and are named `NNNN_description.sql`. The runner tracks applied migrations in a `schema_migrations` table so each file runs exactly once per database.
+Migration files live in `db/migrations/` and are named `NNNN_description.sql` (must start with a digit — editor temp files are ignored). The runner tracks applied migrations in a `schema_migrations` table so each file runs exactly once per database.
+
+Statements are split on `;` outside single-quoted strings, so semicolons inside `COMMENT '...'` text are safe. Migration files must still be **UTF-8** encoded (avoid Windows-1252 characters such as smart dashes).
 
 ### Adding a new migration
 
 1. Create `db/migrations/NNNN_description.sql` with the next available number.
 2. Write plain SQL — `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, `UPDATE`, etc.
-3. Run `python db/migrate.py` to apply it.
+3. Save the file as UTF-8. Prefer ASCII hyphens in comments; avoid semicolons inside quoted strings when possible.
+4. Run `python db/migrate.py` to apply it locally, then commit.
 
 The runner gracefully handles the common "already in desired state" MySQL errors:
 
@@ -310,9 +327,11 @@ python db/migrate.py --baseline  # register existing DB without running SQL
 After each successful parse, `fly_profiling(<mobile_number>)` is called automatically. The procedure:
 
 1. Computes 18 features from `tbl_raw_mpesa_statements` (6-month and 3-month windows).
-2. Scores them against a risk scorecard and a turnover scorecard.
-3. Assigns a `credit_limit` based on the combined `risk_segment` × `turnover_segment` matrix.
-4. Writes results to `tbl_scoring_features`, `tbl_subscriber_profiles`, and `customer_credit_limit`.
+2. Computes 6-month inflow totals and a debt-to-income ratio (`lender_inflow / total_inflow`) from digital-lender dictionary matches.
+3. Scores features against a risk scorecard and a turnover scorecard.
+4. Assigns a `credit_limit` based on the combined `risk_segment` × `turnover_segment` matrix.
+5. Hard-gates subscribers to `not_qualified` when `debt_to_income_ratio > 50 %`.
+6. Writes results to `tbl_scoring_features`, `tbl_subscriber_profiles`, and `customer_credit_limit`.
 
 The stored procedure is read from `db/procedures/fly_profiling.sql` and (re)deployed on every startup — edit the file and restart to pick up changes.
 
@@ -331,6 +350,7 @@ For each subscriber it inserts up to three ranked reasons, derived entirely from
 | Priority | Source | What it tells you |
 |---|---|---|
 | **1 — `INSUFFICIENT_HISTORY`** | `tbl_subscriber_profiles.age_days` | Statement history < 90 days; the subscriber simply needs to wait |
+| **1–2 — `HIGH_DEBT_TO_INCOME`** | `tbl_subscriber_profiles.debt_to_income_ratio` | Digital-lender inflows exceed 50 % of total inflows — hard gate from `fly_profiling()` |
 | **2 — `WEAK_SCORING_FEATURE`** | `tbl_scoring_features` (latest row) | The one scorecard feature that lost the most points relative to its maximum — the highest-leverage behaviour to improve |
 | **3 — `LOW_TURNOVER` / `HIGH_CREDIT_RISK`** | `tbl_subscriber_profiles` | Turnover too low for the subscriber's risk level, or risk score too low for any turnover to compensate |
 
@@ -349,7 +369,7 @@ Reference calibration points against the scoring model's segments:
 | 5 (< 127) | 127 | ~65% |
 | 8 (≥ 169) | 169 | ~88% |
 
-The procedure source lives at `db/procedures/sp_populate_rejection_reasons.sql`; the table DDL and `CREATE PROCEDURE` statement are in migration `0016`.
+The procedure source lives at `db/procedures/sp_populate_rejection_reasons.sql`. Table DDL is in migration `0016`; DTI columns on `tbl_subscriber_profiles` are added by migration `0017`.
 
 ---
 
@@ -369,28 +389,86 @@ make clean          # remove .pyc files and __pycache__
 
 ## Deployment
 
-The project deploys automatically to production via GitHub Actions on every merge to `main`.
+The project deploys automatically to **production** (`65.20.86.247`) via GitHub Actions whenever a commit lands on `main` — typically when a pull request is merged.
 
 ### CI/CD pipeline
 
-1. **CI** (`ci.yml`) — runs `make check` (lint + tests) on every pull request.
-2. **Deploy** (`deploy.yml`) — SSHes into the production server and runs `scripts/server-deploy.sh` on merge to `main`.
+| Workflow | File | Trigger | What it does |
+|---|---|---|---|
+| **CI** | `.github/workflows/ci.yml` | Every push and pull request (all branches) | Lint with flake8 and run pytest on Python 3.11 and 3.12 |
+| **Deploy** | `.github/workflows/deploy.yml` | Push to `main`, or manual **Run workflow** | SSH to `65.20.86.247` and execute `scripts/server-deploy.sh` |
 
-### `server-deploy.sh` steps
+**Recommended:** protect the `main` branch and require the **CI / Lint & Test** status checks to pass before merging, so only tested code reaches production.
 
-1. `git pull` latest code from `main`.
-2. Activate the virtualenv and sync `pip install -r requirements.txt`.
-3. (Optionally) restart a `systemd` service if the parser is run as a persistent process.
+Deploy jobs use a concurrency group (`production-deploy`) so overlapping deploys do not run in parallel.
+
+### `server-deploy.sh` steps (on the server)
+
+1. `git fetch` and reset `main` to `origin/main`.
+2. Activate `.venv` (or `venv`) and run `pip install -r requirements.txt`.
+3. Run `python db/migrate.py` — applies any pending migrations (idempotent; reads DB credentials from `.env`).
+4. (Optional) restart a `systemd` service — uncomment in the script if the parser runs as a persistent daemon.
 
 ### Required GitHub secrets
 
-| Secret | Value |
-|---|---|
-| `SSH_HOST` | Production server IP / hostname |
-| `SSH_USER` | SSH login user |
-| `SSH_PRIVATE_KEY` | Private key with access to the server |
+The production host (`65.20.86.247`) is set in the workflow file. Only SSH credentials are stored as secrets:
+
+| Secret | Required | Description |
+|---|---|---|
+| `SSH_USER` | Yes | SSH login user on the production server (e.g. `root` or `deploy`) |
+| `SSH_PRIVATE_KEY` | Yes | Private key whose public key is in `~/.ssh/authorized_keys` on the server |
+| `SSH_PORT` | No | SSH port (defaults to `22`) |
 
 Set these at: **Settings → Secrets and variables → Actions → Repository secrets**.
+
+#### One-time deploy key setup
+
+On your laptop, generate a key and follow the printed instructions:
+
+```bash
+bash scripts/setup-github-deploy-key.sh root
+```
+
+Then on **65.20.86.247** (as the same user as `SSH_USER`, e.g. `root`):
+
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+# paste the public key line from the script output:
+echo "ssh-ed25519 AAAA... github-actions-aleza-deploy" >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+```
+
+Test before relying on GitHub Actions:
+
+```bash
+ssh -i ./gh_actions_deploy_key root@65.20.86.247
+```
+
+Copy the **private** key file contents into the `SSH_PRIVATE_KEY` secret (never commit the key file).
+
+### Deploy failed: `unable to authenticate`
+
+```
+ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey]
+```
+
+The workflow reached the server but the key was rejected. Check in order:
+
+| Check | Fix |
+|---|---|
+| `SSH_PRIVATE_KEY` is the **private** key | Must include `BEGIN OPENSSH PRIVATE KEY` (or `BEGIN RSA PRIVATE KEY`), not `.pub` |
+| Newlines preserved in the GitHub secret | Re-paste the full key; GitHub secrets support multiline values |
+| Public key on the server | `cat ~/.ssh/authorized_keys` on the server must contain the matching `.pub` line |
+| `SSH_USER` matches the account | Key must be in `/home/<SSH_USER>/.ssh/authorized_keys` (e.g. `root` → `/root/.ssh/`) |
+| Permissions on the server | `chmod 700 ~/.ssh` and `chmod 600 ~/.ssh/authorized_keys` |
+| `PubkeyAuthentication` enabled | In `/etc/ssh/sshd_config`, `PubkeyAuthentication yes` then `systemctl reload sshd` |
+| Passphrase on the key | Use a key with empty passphrase (`-N ""` in `setup-github-deploy-key.sh`) |
+
+After updating secrets or `authorized_keys`, re-run **Deploy to Production** from the Actions tab.
+
+### Manual deploy
+
+From the GitHub **Actions** tab, open **Deploy to Production** and click **Run workflow** (uses `workflow_dispatch`).
 
 ---
 
@@ -409,11 +487,16 @@ git clone <repo-url> .
 #### 2. Create and activate a virtualenv
 
 ```bash
+# Ubuntu: install venv support if python3 -m venv fails
+apt install -y python3-venv python3-pip
+
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+> **Note:** `scripts/server-deploy.sh` creates `.venv` automatically on deploy if it is missing. For the first deploy before that script is on `main`, create the venv once manually (commands above).
 
 #### 3. Create runtime directories
 
@@ -492,7 +575,28 @@ echo "  export \$(cat .env | xargs) && python db/migrate.py"
 
 ### Server assumptions (ongoing deploys)
 
-- Repo is cloned at `/var/www/server/parser`
-- Virtualenv exists at `/var/www/server/parser/.venv`
-- `.env` with real credentials lives at `/var/www/server/parser/.env` (not tracked by git)
-- All runtime directories listed above exist
+| Item | Path / value |
+|---|---|
+| Production host | `65.20.86.247` |
+| Application root | `/var/www/server/parser` |
+| Virtualenv | `/var/www/server/parser/.venv` (or `venv`) |
+| Environment file | `/var/www/server/parser/.env` (not tracked by git) |
+| Deploy script | `/var/www/server/parser/scripts/server-deploy.sh` |
+
+Runtime directories (`Mpesa_pdf_statement/`, `logs/`, `queue/`, etc.) must exist before the first parse job runs — see [Server initial setup](#server-initial-setup).
+
+### Troubleshooting migrations on the server
+
+```bash
+cd /var/www/server/parser
+source .venv/bin/activate
+export $(cat .env | xargs)
+python db/migrate.py --status   # see applied vs pending
+python db/migrate.py            # apply pending migrations
+```
+
+Common issues:
+
+- **`UnicodeDecodeError`** — a migration file is not UTF-8; re-save as UTF-8 or replace non-ASCII characters in comments.
+- **SQL syntax error near a `COMMENT`** — usually caused by an old runner splitting on `;` inside quoted strings; pull the latest `db/migrate.py` and ensure migration `0017` uses parentheses instead of a semicolon in the DTI column comment.
+- **Duplicate column (1060)** — safe to re-run; the runner skips statements that are already in the desired state.

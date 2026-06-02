@@ -37,9 +37,33 @@ jobs:
             echo "Add them at: Settings → Secrets and variables → Actions → Repository secrets"
             exit 1
           fi
+
+          if [[ "$SSH_PRIVATE_KEY" == *"BEGIN PUBLIC KEY"* ]]; then
+            echo "ERROR: SSH_PRIVATE_KEY looks like a PUBLIC key."
+            echo "Store the private key (BEGIN OPENSSH PRIVATE KEY or BEGIN RSA PRIVATE KEY)."
+            exit 1
+          fi
+          if [[ "$SSH_PRIVATE_KEY" != *"BEGIN"* ]]; then
+            echo "ERROR: SSH_PRIVATE_KEY is missing PEM headers."
+            echo "Paste the entire key file, including BEGIN/END lines and newlines."
+            exit 1
+          fi
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          if ! ssh-keygen -y -f /tmp/deploy_key >/dev/null 2>&1; then
+            echo "ERROR: SSH_PRIVATE_KEY is invalid or passphrase-protected."
+            echo "Generate a key without a passphrase:"
+            echo "  bash scripts/setup-github-deploy-key.sh <ssh_user>"
+            exit 1
+          fi
+          rm -f /tmp/deploy_key
+
+          echo "Secrets OK. Deploying as ${SSH_USER}@${{ env.PROD_HOST }}:${SSH_PORT:-22}"
         env:
           SSH_USER:        ${{ secrets.SSH_USER }}
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PORT:        ${{ secrets.SSH_PORT }}
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
@@ -48,4 +72,6 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT || 22 }}
+          timeout: 60s
+          command_timeout: 10m
           script: bash /var/www/server/parser/scripts/server-deploy.sh
