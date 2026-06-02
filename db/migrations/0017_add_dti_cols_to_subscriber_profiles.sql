@@ -5,11 +5,11 @@
 --                 Customers whose DTI > 50 % are hard-gated to not_qualified.
 --
 --                 New columns:
---                   total_inflow            – KES sum of all positive txns (6m)
---                   lender_inflow           – KES sum of digital-lender inflows (6m)
---                   debt_to_income_ratio    – lender_inflow / total_inflow (4 d.p.)
---                   total_inflow_txn_count  – count of all positive txns (6m)
---                   lender_inflow_txn_count – count of digital-lender txns (6m)
+--                   total_inflow            - KES sum of all positive txns (6m)
+--                   lender_inflow           - KES sum of digital-lender inflows (6m)
+--                   debt_to_income_ratio    - lender_inflow / total_inflow (4 d.p.)
+--                   total_inflow_txn_count  - count of all positive txns (6m)
+--                   lender_inflow_txn_count - count of digital-lender txns (6m)
 --
 --                 Safe to re-run: error 1060 (column already exists) -> ignored.
 -- =============================================================================

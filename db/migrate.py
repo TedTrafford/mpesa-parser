@@ -125,7 +125,11 @@ def _migration_files() -> List[str]:
     """Return sorted list of .sql filenames from the migrations directory."""
     if not os.path.isdir(MIGRATIONS_DIR):
         return []
-    return sorted(f for f in os.listdir(MIGRATIONS_DIR) if f.endswith(".sql"))
+    return sorted(
+        f
+        for f in os.listdir(MIGRATIONS_DIR)
+        if f.endswith(".sql") and f[0].isdigit()
+    )
 
 
 def _applied_versions(conn) -> Set[str]:
