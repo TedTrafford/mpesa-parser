@@ -26,7 +26,7 @@ cd "$DEPLOY_PATH"
 
 # -- 1. Pull latest code from main -------------------------------------------
 echo ""
-echo "[1/3] Pulling latest code..."
+echo "[1/4] Pulling latest code..."
 git fetch --prune origin
 git checkout main
 git reset --hard origin/main
@@ -34,7 +34,7 @@ echo "  HEAD is now at: $(git rev-parse --short HEAD) -- $(git log -1 --pretty=%
 
 # -- 2. Activate virtualenv and sync dependencies ----------------------------
 echo ""
-echo "[2/3] Syncing Python dependencies..."
+echo "[2/4] Syncing Python dependencies..."
 
 if [ -f "$DEPLOY_PATH/.venv/bin/activate" ]; then
     VENV_ACTIVATE="$DEPLOY_PATH/.venv/bin/activate"
@@ -52,16 +52,24 @@ pip install --quiet --upgrade pip
 pip install --quiet -r requirements.txt
 echo "  Dependencies up to date."
 
-# -- 3. Optional: restart a long-running systemd service ---------------------
+# -- 3. Apply pending database migrations ------------------------------------
+# The runner is idempotent: already-applied migrations are skipped. DB
+# credentials are read from the server-local .env via config.py.
+echo ""
+echo "[3/4] Applying database migrations..."
+python db/migrate.py
+echo "  Migrations up to date."
+
+# -- 4. Optional: restart a long-running systemd service ---------------------
 # Uncomment if you run parse_single.py as a persistent service named "mpesa-parser":
 #
 # echo ""
-# echo "[3/3] Restarting service..."
+# echo "[4/4] Restarting service..."
 # sudo systemctl restart mpesa-parser
 # sudo systemctl status  mpesa-parser --no-pager
 
 echo ""
-echo "[3/3] No persistent service to restart (on-demand processing model)."
+echo "[4/4] No persistent service to restart (on-demand processing model)."
 
 echo ""
 echo "=================================================="
