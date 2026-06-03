@@ -74,4 +74,17 @@ jobs:
           port: ${{ secrets.SSH_PORT || 22 }}
           timeout: 60s
           command_timeout: 10m
-          script: bash /var/www/server/parser/scripts/server-deploy.sh
+          script: |
+            set -euo pipefail
+            DEPLOY_PATH=/var/www/server/parser
+            cd "$DEPLOY_PATH"
+            # Bootstrap venv before server-deploy.sh (works even if main still has the old script)
+            if [ ! -f "$DEPLOY_PATH/.venv/bin/activate" ] && [ ! -f "$DEPLOY_PATH/venv/bin/activate" ]; then
+              echo "Bootstrap: creating virtualenv at $DEPLOY_PATH/.venv ..."
+              python3 -m venv "$DEPLOY_PATH/.venv" || {
+                echo "ERROR: install python3-venv on the server:"
+                echo "  apt install -y python3-venv python3-pip"
+                exit 1
+              }
+            fi
+            bash "$DEPLOY_PATH/scripts/server-deploy.sh"
