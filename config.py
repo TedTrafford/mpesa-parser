@@ -1,19 +1,67 @@
 #!/usr/bin/env python3
 import os
+import sys
 
 # Base directory for the project
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+# ---------------------------------------------------------------------------
+# .env loader
+# ---------------------------------------------------------------------------
+# Load key=value pairs from a local .env file into os.environ so that every
+# entry point (the queued worker, db/migrate.py, fly_profiling, batch jobs)
+# reads the same credentials regardless of how the process was launched.
+#
+# Real environment variables always win: a value already present in the
+# environment (e.g. set by CI or systemd) is never overwritten by .env.
+# This is intentionally dependency-free (no python-dotenv required).
+def _load_dotenv(path: str) -> None:
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                if line.lower().startswith("export "):
+                    line = line[len("export "):].lstrip()
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        pass
+
+
+_load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+
 # ---------------------------------------------------------------------------
 # MySQL database connection settings
 # ---------------------------------------------------------------------------
-DB_HOST = os.environ.get("MPESA_DB_HOST", "139.84.243.180")
+# Defaults intentionally point at localhost (not a remote host) so that a
+# missing/unloaded .env fails fast against a local DB instead of silently
+# writing to the wrong production server.
+DB_HOST = os.environ.get("MPESA_DB_HOST", "127.0.0.1")
 DB_PORT = int(os.environ.get("MPESA_DB_PORT", 3306))
 DB_NAME = os.environ.get("MPESA_DB_NAME", "Data_Science")
 DB_USER = os.environ.get("MPESA_DB_USER", "staging")
-DB_PASSWORD = os.environ.get("MPESA_DB_PASSWORD", "gQTnYQ8Xwh1nl0di1rbz")
+DB_PASSWORD = os.environ.get("MPESA_DB_PASSWORD", "")
 DB_TABLE      = "tbl_raw_mpesa_statements"
 DB_LOGS_TABLE = "tbl_file_processing_logs"
+
+# Warn loudly when DB credentials are missing — prevents silent connections to
+# an unintended database. Does not raise, so non-DB tooling can still import config.
+if not DB_PASSWORD:
+    print(
+        "WARNING: MPESA_DB_PASSWORD is not set (no .env loaded and no env var). "
+        "Database operations will likely fail. Expected .env at "
+        f"{os.path.join(BASE_DIR, '.env')}",
+        file=sys.stderr,
+    )
 
 # Directory paths
 INPUT_DIR = os.path.join(BASE_DIR, "Mpesa_pdf_statement")

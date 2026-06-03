@@ -58,10 +58,19 @@ pip install --quiet -r requirements.txt
 echo "  Dependencies up to date."
 
 # -- 3. Apply pending database migrations ------------------------------------
-# The runner is idempotent: already-applied migrations are skipped. DB
-# credentials are read from the server-local .env via config.py.
+# config.py auto-loads .env, but we also export it here as a safety net so the
+# migration step provably targets the same database as the parser worker.
 echo ""
 echo "[3/4] Applying database migrations..."
+if [ -f "$DEPLOY_PATH/.env" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    . "$DEPLOY_PATH/.env"
+    set +a
+    echo "  Loaded DB config from .env (host: ${MPESA_DB_HOST:-unset})"
+else
+    echo "  WARNING: no .env found at $DEPLOY_PATH/.env — migrations may target the wrong DB."
+fi
 python db/migrate.py
 echo "  Migrations up to date."
 
