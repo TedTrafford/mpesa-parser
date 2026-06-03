@@ -142,7 +142,11 @@ MPESA_DB_PASSWORD=your_password_here
 # MOBILE_COUNTRY_CODE=254
 ```
 
-Load the variables before running any script:
+`config.py` **auto-loads `.env`** from the project root on import, so the queued worker (`parse_single.py`), `db/migrate.py`, batch jobs, and `fly_profiling` all read the same credentials regardless of how the process is launched. Real environment variables always take precedence over `.env` (useful for CI).
+
+> **Important:** If `.env` is missing and no `MPESA_DB_*` environment variables are set, `config.py` falls back to `127.0.0.1` and prints a warning — it will **not** silently connect to a remote server. Always keep a valid `.env` next to `config.py` on the server (`/var/www/server/parser/.env`).
+
+Manual export is optional (e.g. for ad-hoc SQL tooling):
 
 ```bash
 export $(cat .env | xargs)
