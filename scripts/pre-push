@@ -34,13 +34,13 @@ fi
 # ── 1. lint ───────────────────────────────────────────────────────────────────
 echo ""
 echo "[1/2] Linting..."
-$PYTHON -m flake8 config.py parser/ db/ parse_single.py process_all_pdfs.py \
+"$PYTHON" -m flake8 config.py parser/ db/ parse_single.py process_all_pdfs.py \
     --count \
     --select=E9,F63,F7,F82,F4 \
     --show-source \
     --statistics
 
-$PYTHON -m flake8 config.py parser/ db/ parse_single.py process_all_pdfs.py \
+"$PYTHON" -m flake8 config.py parser/ db/ parse_single.py process_all_pdfs.py \
     --count \
     --max-line-length=120 \
     --extend-ignore=E203,E221,E272,E302,E303,E305,E402,E501,W291,W292,W293,W503 \
@@ -51,7 +51,7 @@ echo "  Lint passed."
 # ── 2. tests ──────────────────────────────────────────────────────────────────
 echo ""
 echo "[2/2] Running tests..."
-$PYTHON -m pytest tests/ -v --tb=short
+"$PYTHON" -m pytest tests/ -v --tb=short
 
 echo ""
 echo "========================================="

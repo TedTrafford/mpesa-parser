@@ -85,7 +85,9 @@ Each transaction row extracted from the PDF is deduplicated against the database
 ├── tests/
 │   ├── test_config.py
 │   ├── test_parser.py
-│   └── test_parse_single.py
+│   ├── test_parse_single.py
+│   ├── test_profiling_procedures.py   # Credit-scoring / rejection reason rules
+│   └── profiling_rules.py             # Reference logic mirrored from stored procedures
 ├── .env.example                   # Environment variable template
 ├── Makefile                       # Local dev helpers
 └── .github/workflows/
@@ -290,8 +292,8 @@ Subscribers with `debt_to_income_ratio > 0.50` (50 %) are hard-gated to `not_qua
 | `INSUFFICIENT_HISTORY` | `age_days < 90` — hard gate; no limit possible regardless of score | 1 |
 | `HIGH_DEBT_TO_INCOME` | `debt_to_income_ratio > 50 %` — digital-lender inflows dominate total inflows | 1 or 2 |
 | `WEAK_SCORING_FEATURE` | The single scorecard feature with the highest score gap (most points lost vs. maximum) | 1 or 2 |
-| `LOW_TURNOVER` | `turnover_segment` below the minimum required for the subscriber's `risk_segment` | 2 or 3 |
-| `HIGH_CREDIT_RISK` | `risk_segment ≤ 2` — score so low no achievable turnover level can qualify the subscriber | 2 or 3 |
+| `LOW_TURNOVER` | `turnover_segment` below the minimum required for the subscriber's `risk_segment` (risk 5–8 only) | 2, 3, or 4 |
+| `HIGH_CREDIT_RISK` | `risk_segment ≤ 4` — score too low for any credit-limit assignment | 2, 3, or 4 |
 
 ---
 
@@ -333,30 +335,56 @@ After each successful parse, `fly_profiling(<mobile_number>)` is called automati
 1. Computes 18 features from `tbl_raw_mpesa_statements` (6-month and 3-month windows).
 2. Computes 6-month inflow totals and a debt-to-income ratio (`lender_inflow / total_inflow`) from digital-lender dictionary matches.
 3. Scores features against a risk scorecard and a turnover scorecard.
-4. Assigns a `credit_limit` based on the combined `risk_segment` × `turnover_segment` matrix.
-5. Hard-gates subscribers to `not_qualified` when `debt_to_income_ratio > 50 %`.
-6. Writes results to `tbl_scoring_features`, `tbl_subscriber_profiles`, and `customer_credit_limit`.
+4. Assigns a `credit_limit` based on the combined `risk_segment` × `turnover_segment` matrix (see below).
+5. Sets `model_category = 'qualified'` **only when `credit_limit > 0`**, so qualification always matches an actual limit assignment.
+6. Hard-gates subscribers to `not_qualified` when `debt_to_income_ratio > 50 %`.
+7. Writes results to `tbl_scoring_features`, `tbl_subscriber_profiles`, and `customer_credit_limit`.
+8. Calls `sp_populate_rejection_reasons(<mobile_number>)` for every `not_qualified` subscriber.
 
 The stored procedure is read from `db/procedures/fly_profiling.sql` and (re)deployed on every startup — edit the file and restart to pick up changes.
 
+### Credit limit matrix
+
+A subscriber must have at least **90 days** of statement history (`age_days ≥ 90`) before any limit is assigned. Qualifying combinations:
+
+| Risk segment | Min turnover segment | Credit limit (KES) |
+|---|---|---|
+| 8 | 5 | 5,000 |
+| 8 | 6 | 6,000 |
+| 8 | 7 | 7,000 |
+| 8 | 8 | 8,000 |
+| 7 | 6 | 5,000 |
+| 7 | 7 | 6,000 |
+| 7 | 8 | 8,000 |
+| 6 | 7 | 5,000 |
+| 6 | 8 | 6,000 |
+| 5 | 8 | 5,000 |
+
+All other risk × turnover combinations receive `credit_limit = 0` and `model_category = 'not_qualified'`. Risk segments 1–4 never receive a limit regardless of turnover.
+
 ### Rejection reasons
 
-Subscribers whose `model_category` is set to `not_qualified` by `fly_profiling` can be analysed by the companion procedure `sp_populate_rejection_reasons()`. It is **not** called automatically on every parse; run it on demand (e.g. after a bulk profiling run or on a scheduled basis):
+When `fly_profiling` sets `model_category = 'not_qualified'`, it immediately calls `sp_populate_rejection_reasons(<mobile_number>)` to populate `tbl_rejection_reasons` for that subscriber. You can also run a batch backfill for all pending rejections:
 
 ```sql
-CALL sp_populate_rejection_reasons();
+-- Single subscriber (called automatically by fly_profiling)
+CALL sp_populate_rejection_reasons('254722123456');
+
+-- Batch backfill for all not_qualified subscribers missing reasons
+CALL sp_populate_rejection_reasons(NULL);
 ```
 
-The procedure is idempotent — it only processes `not_qualified` mobile numbers that have no entry yet in `tbl_rejection_reasons`, using `mobile_number` as the primary identifier. Re-running it after new rejections accumulate is safe.
+The procedure is idempotent — it only inserts reason codes that do not yet exist for a given `mobile_number`. Re-running it after new rejections accumulate is safe.
 
-For each subscriber it inserts up to three ranked reasons, derived entirely from data already in the database:
+For each subscriber it inserts up to five ranked reasons, derived entirely from data already in the database:
 
 | Priority | Source | What it tells you |
 |---|---|---|
 | **1 — `INSUFFICIENT_HISTORY`** | `tbl_subscriber_profiles.age_days` | Statement history < 90 days; the subscriber simply needs to wait |
 | **1–2 — `HIGH_DEBT_TO_INCOME`** | `tbl_subscriber_profiles.debt_to_income_ratio` | Digital-lender inflows exceed 50 % of total inflows — hard gate from `fly_profiling()` |
-| **2 — `WEAK_SCORING_FEATURE`** | `tbl_scoring_features` (latest row) | The one scorecard feature that lost the most points relative to its maximum — the highest-leverage behaviour to improve |
-| **3 — `LOW_TURNOVER` / `HIGH_CREDIT_RISK`** | `tbl_subscriber_profiles` | Turnover too low for the subscriber's risk level, or risk score too low for any turnover to compensate |
+| **1–3 — `WEAK_SCORING_FEATURE`** | `tbl_scoring_features` (latest row) | The one scorecard feature that lost the most points relative to its maximum — the highest-leverage behaviour to improve |
+| **2–4 — `LOW_TURNOVER`** | `tbl_subscriber_profiles` | Turnover below the minimum for the subscriber's risk segment (risk 5–8 only; see matrix above) |
+| **2–4 — `HIGH_CREDIT_RISK`** | `tbl_subscriber_profiles` | Risk segment ≤ 4 — no credit limit is assigned at any turnover level |
 
 Each reason row also carries a **`repayment_probability`** — the subscriber's estimated probability of repayment expressed as a percentage, computed from the scorecard total via a logistic sigmoid:
 
@@ -387,6 +415,23 @@ make lint           # run flake8
 make check          # lint + test (mirrors CI — run before pushing)
 make hooks          # install the pre-push git hook
 make clean          # remove .pyc files and __pycache__
+```
+
+### Test suite
+
+Tests run without a live database. The suite includes:
+
+| Module | What it covers |
+|---|---|
+| `tests/test_config.py` | Mobile number normalisation, transaction type mapping |
+| `tests/test_parser.py` | PDF parsing, manifest hashing, metadata attachment |
+| `tests/test_parse_single.py` | Phone validation and balance continuity checks |
+| `tests/test_profiling_procedures.py` | Credit limit matrix, `model_category` alignment, rejection reason thresholds, and SQL procedure source checks |
+
+Credit-scoring rule tests use `tests/profiling_rules.py`, a Python reference implementation that mirrors the logic in `db/procedures/fly_profiling.sql` and `db/procedures/sp_populate_rejection_reasons.sql`. Run just the profiling tests:
+
+```bash
+pytest tests/test_profiling_procedures.py -v
 ```
 
 ---
