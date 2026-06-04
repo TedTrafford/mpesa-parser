@@ -77,10 +77,12 @@ CREATE TABLE IF NOT EXISTS `tbl_rejection_reasons` (
 -- ---------------------------------------------------------------------------
 -- NOTE: sp_populate_rejection_reasons is deployed at application startup via
 -- db/procedures/sp_populate_rejection_reasons.sql (same mechanism as
--- fly_profiling).  It cannot be embedded here because the migration runner
--- (_split_statements in db/migrate.py) splits on ";" and cannot handle
--- stored-procedure bodies.  The DROP below ensures a clean re-deploy on the
--- next startup even if a partial version was left by a previous failed run.
+-- fly_profiling) and invoked at the end of every fly_profiling() call.
+-- Pass NULL to process all not_qualified subscribers (batch backfill).
+-- It cannot be embedded here because the migration runner (_split_statements
+-- in db/migrate.py) splits on ";" and cannot handle stored-procedure bodies.
+-- The DROP below ensures a clean re-deploy on the next startup even if a
+-- partial version was left by a previous failed run.
 -- ---------------------------------------------------------------------------
 
 DROP PROCEDURE IF EXISTS `sp_populate_rejection_reasons`;

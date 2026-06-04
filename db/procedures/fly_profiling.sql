@@ -418,16 +418,10 @@ BEGIN
         ELSE 0
     END; 
 
+    -- Qualification must mirror the credit-limit matrix above: only combinations
+    -- that receive a non-zero limit are marked qualified.
     SET model_category = CASE
-        WHEN age_days >= 90 AND (
-                 (risk_segment = 3 AND turnover_segment IN (7, 8))              OR
-                 (risk_segment = 4 AND turnover_segment IN (6, 7, 8))           OR
-                 (risk_segment = 5 AND turnover_segment IN (5, 6, 7, 8))        OR
-                 (risk_segment = 6 AND turnover_segment IN (4, 5, 6, 7, 8))     OR
-                 (risk_segment = 7 AND turnover_segment IN (3, 4, 5, 6, 7, 8))  OR
-                 (risk_segment = 8 AND turnover_segment IN (2, 3, 4, 5, 6, 7, 8))
-             )
-        THEN 'qualified'
+        WHEN var_credit_limit > 0 THEN 'qualified'
         ELSE 'not_qualified'
     END;
 
@@ -485,6 +479,10 @@ BEGIN
         VALUES
             (ip_mobile_number, var_credit_limit, NOW(), 'FTB1');
 
+    END IF;
+
+    IF model_category = 'not_qualified' THEN
+        CALL sp_populate_rejection_reasons(ip_mobile_number);
     END IF;
 
 END

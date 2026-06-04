@@ -1,6 +1,8 @@
 DELIMITER $$
 
-CREATE PROCEDURE `sp_populate_rejection_reasons`()
+CREATE PROCEDURE `sp_populate_rejection_reasons`(
+    IN p_mobile_number VARCHAR(20)
+)
 BEGIN
 
     -- -----------------------------------------------------------------------
@@ -30,6 +32,7 @@ BEGIN
                    ) AS rn
             FROM   tbl_subscriber_profiles sp2
             WHERE  sp2.model_category = 'not_qualified'
+              AND  (p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number)
         ) sp
         WHERE sp.rn = 1
           AND NOT EXISTS (
@@ -88,6 +91,7 @@ BEGIN
                    ) AS rn
             FROM   tbl_subscriber_profiles sp2
             WHERE  sp2.model_category = 'not_qualified'
+              AND  (p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number)
         ) sp
         WHERE sp.rn = 1
           AND sp.debt_to_income_ratio > 0.5000
@@ -152,6 +156,7 @@ BEGIN
                    ) AS rn
             FROM   tbl_subscriber_profiles sp2
             WHERE  sp2.model_category = 'not_qualified'
+              AND  (p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number)
         ) sp
         WHERE sp.rn = 1
           AND NOT EXISTS (
@@ -406,19 +411,17 @@ BEGIN
 
     -- -----------------------------------------------------------------------
     -- Reason LOW_TURNOVER (rank 2, 3, or 4)
-    --   Applies when age_days >= 90, risk_segment >= 3, but turnover_segment
+    --   Applies when age_days >= 90, risk_segment 5-8, but turnover_segment
     --   is still below the minimum required to qualify at that risk level.
     --   Rank increments by 1 for each active hard gate above it:
     --     +1 if INSUFFICIENT_HISTORY (age_days < 90)
     --     +1 if HIGH_DEBT_TO_INCOME  (debt_to_income_ratio > 50 %)
     --
-    --   Qualification thresholds (from fly_profiling model_category logic):
-    --     risk_segment = 3  -> need turnover_segment >= 7
-    --     risk_segment = 4  -> need turnover_segment >= 6
-    --     risk_segment = 5  -> need turnover_segment >= 5
-    --     risk_segment = 6  -> need turnover_segment >= 4
-    --     risk_segment = 7  -> need turnover_segment >= 3
-    --     risk_segment = 8  -> need turnover_segment >= 2
+    --   Qualification thresholds (from fly_profiling credit-limit matrix):
+    --     risk_segment = 5  -> need turnover_segment >= 8
+    --     risk_segment = 6  -> need turnover_segment >= 7
+    --     risk_segment = 7  -> need turnover_segment >= 6
+    --     risk_segment = 8  -> need turnover_segment >= 5
     --   Idempotent: skips any subscriber that already has this reason_code.
     -- -----------------------------------------------------------------------
     INSERT INTO tbl_rejection_reasons
@@ -444,6 +447,7 @@ BEGIN
                    ) AS rn
             FROM   tbl_subscriber_profiles sp2
             WHERE  sp2.model_category = 'not_qualified'
+              AND  (p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number)
         ) sp
         WHERE sp.rn = 1
           AND NOT EXISTS (
@@ -465,12 +469,10 @@ BEGIN
             '. At risk segment ', c.risk_segment,
             ', a minimum turnover segment of ',
             CASE c.risk_segment
-                WHEN 3 THEN 7
-                WHEN 4 THEN 6
-                WHEN 5 THEN 5
-                WHEN 6 THEN 4
-                WHEN 7 THEN 3
-                WHEN 8 THEN 2
+                WHEN 5 THEN 8
+                WHEN 6 THEN 7
+                WHEN 7 THEN 6
+                WHEN 8 THEN 5
                 ELSE 99
             END,
             ' is required to qualify.'
@@ -481,23 +483,22 @@ BEGIN
         ROUND(100.0 / (1.0 + EXP(-(COALESCE(c.total_score, 0) - 100.0) / 35.0)), 2)
     FROM  cands c
     WHERE (c.age_days IS NULL OR c.age_days >= 90)
-      AND c.risk_segment >= 3
+      AND c.risk_segment BETWEEN 5 AND 8
       AND c.turnover_segment <
           CASE c.risk_segment
-              WHEN 3 THEN 7
-              WHEN 4 THEN 6
-              WHEN 5 THEN 5
-              WHEN 6 THEN 4
-              WHEN 7 THEN 3
-              WHEN 8 THEN 2
+              WHEN 5 THEN 8
+              WHEN 6 THEN 7
+              WHEN 7 THEN 6
+              WHEN 8 THEN 5
               ELSE 99
           END;
 
     -- -----------------------------------------------------------------------
     -- Reason HIGH_CREDIT_RISK (rank 2, 3, or 4)
-    --   Applies when age_days >= 90 but risk_segment <= 2.
-    --   No achievable turnover level can qualify this subscriber; the risk
-    --   score itself must improve before any limit can be granted.
+    --   Applies when age_days >= 90 but risk_segment <= 4.
+    --   The credit-limit matrix only assigns limits from risk segment 5 upward;
+    --   no achievable turnover level can qualify this subscriber until the
+    --   scorecard score improves.
     --   Rank increments by 1 for each active hard gate above it:
     --     +1 if INSUFFICIENT_HISTORY (age_days < 90)
     --     +1 if HIGH_DEBT_TO_INCOME  (debt_to_income_ratio > 50 %)
@@ -526,6 +527,7 @@ BEGIN
                    ) AS rn
             FROM   tbl_subscriber_profiles sp2
             WHERE  sp2.model_category = 'not_qualified'
+              AND  (p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number)
         ) sp
         WHERE sp.rn = 1
           AND NOT EXISTS (
@@ -543,7 +545,7 @@ BEGIN
         CONCAT(
             'Total scorecard score is ', COALESCE(c.total_score, 0),
             ' (risk segment ', c.risk_segment, '). ',
-            'A minimum risk segment of 3 is required to qualify for any credit limit, ',
+            'A minimum risk segment of 5 is required to qualify for any credit limit, ',
             'regardless of turnover level. The subscriber must improve key scoring ',
             'behaviours (see the WEAK_SCORING_FEATURE reason above).'
         ),
@@ -553,7 +555,7 @@ BEGIN
         ROUND(100.0 / (1.0 + EXP(-(COALESCE(c.total_score, 0) - 100.0) / 35.0)), 2)
     FROM  cands c
     WHERE (c.age_days IS NULL OR c.age_days >= 90)
-      AND c.risk_segment <= 2;
+      AND c.risk_segment <= 4;
 
 END$$
 
