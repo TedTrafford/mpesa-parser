@@ -48,7 +48,9 @@ from sqlalchemy.engine import Engine
 # Project root on path so config.py is importable from anywhere
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD  # noqa: E402
+from config import (  # noqa: E402
+    DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, MYSQL_CONNECT_ARGS,
+)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -90,7 +92,9 @@ def _get_engine() -> Engine:
         f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
         f"@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
     )
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(
+        url, pool_pre_ping=True, connect_args=MYSQL_CONNECT_ARGS
+    )
 
 
 def _mysql_error_code(exc: Exception) -> Optional[int]:
