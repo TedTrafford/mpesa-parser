@@ -176,9 +176,8 @@ class TestProcedureSources:
 
     def test_rejection_procedure_accepts_mobile_parameter(self, rejection_sql):
         assert "IN p_mobile_number VARCHAR(20)" in rejection_sql
-        assert re.search(
-            r"p_mobile_number IS NULL OR BINARY sp2\.mobile_number = BINARY p_mobile_number",
-            rejection_sql,
+        assert "p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number" in (
+            rejection_sql
         )
 
     def test_rejection_low_turnover_thresholds_in_sql(self, rejection_sql):
