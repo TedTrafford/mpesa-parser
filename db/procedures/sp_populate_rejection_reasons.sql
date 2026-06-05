@@ -7,8 +7,11 @@ CREATE DEFINER=`production`@`%` PROCEDURE `Data_Science`.`sp_populate_rejection_
 )
 BEGIN
 
+    -- Pin the session collation so string literals (= 'not_qualified',
+    -- reason codes, etc.) match the utf8mb4_unicode_ci table columns regardless
+    -- of the caller's connection default.  Table columns are aligned by
+    -- migration 0018, so column-vs-parameter comparisons also match.
     SET collation_connection = 'utf8mb4_unicode_ci';
-    SET p_mobile_number = p_mobile_number COLLATE utf8mb4_unicode_ci;
 
     -- -----------------------------------------------------------------------
     -- Reason INSUFFICIENT_HISTORY (rank 1)
@@ -36,15 +39,15 @@ BEGIN
                        ORDER BY     sp2.last_updated DESC
                    ) AS rn
             FROM   tbl_subscriber_profiles sp2
-            WHERE  sp2.model_category COLLATE utf8mb4_unicode_ci = 'not_qualified'
-              AND  (p_mobile_number IS NULL OR BINARY sp2.mobile_number = BINARY p_mobile_number)
+            WHERE  sp2.model_category = 'not_qualified'
+              AND  (p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number)
         ) sp
         WHERE sp.rn = 1
           AND NOT EXISTS (
               SELECT 1
               FROM   tbl_rejection_reasons rr
-              WHERE  BINARY rr.mobile_number = BINARY sp.mobile_number
-                AND  rr.reason_code COLLATE utf8mb4_unicode_ci = 'INSUFFICIENT_HISTORY'
+              WHERE  rr.mobile_number = sp.mobile_number
+                AND  rr.reason_code = 'INSUFFICIENT_HISTORY'
           )
     )
     SELECT
@@ -95,16 +98,16 @@ BEGIN
                        ORDER BY     sp2.last_updated DESC
                    ) AS rn
             FROM   tbl_subscriber_profiles sp2
-            WHERE  sp2.model_category COLLATE utf8mb4_unicode_ci = 'not_qualified'
-              AND  (p_mobile_number IS NULL OR BINARY sp2.mobile_number = BINARY p_mobile_number)
+            WHERE  sp2.model_category = 'not_qualified'
+              AND  (p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number)
         ) sp
         WHERE sp.rn = 1
           AND sp.debt_to_income_ratio > 0.5000
           AND NOT EXISTS (
               SELECT 1
               FROM   tbl_rejection_reasons rr
-              WHERE  BINARY rr.mobile_number = BINARY sp.mobile_number
-                AND  rr.reason_code COLLATE utf8mb4_unicode_ci = 'HIGH_DEBT_TO_INCOME'
+              WHERE  rr.mobile_number = sp.mobile_number
+                AND  rr.reason_code = 'HIGH_DEBT_TO_INCOME'
           )
     )
     SELECT
@@ -160,15 +163,15 @@ BEGIN
                        ORDER BY     sp2.last_updated DESC
                    ) AS rn
             FROM   tbl_subscriber_profiles sp2
-            WHERE  sp2.model_category COLLATE utf8mb4_unicode_ci = 'not_qualified'
-              AND  (p_mobile_number IS NULL OR BINARY sp2.mobile_number = BINARY p_mobile_number)
+            WHERE  sp2.model_category = 'not_qualified'
+              AND  (p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number)
         ) sp
         WHERE sp.rn = 1
           AND NOT EXISTS (
               SELECT 1
               FROM   tbl_rejection_reasons rr
-              WHERE  BINARY rr.mobile_number = BINARY sp.mobile_number
-                AND  rr.reason_code COLLATE utf8mb4_unicode_ci = 'WEAK_SCORING_FEATURE'
+              WHERE  rr.mobile_number = sp.mobile_number
+                AND  rr.reason_code = 'WEAK_SCORING_FEATURE'
           )
     ),
     latest_sf AS (
@@ -180,7 +183,7 @@ BEGIN
                        ORDER BY     sf2.date_created DESC
                    ) AS rn
             FROM   tbl_scoring_features sf2
-            WHERE  BINARY sf2.mobile_number IN (SELECT BINARY mobile_number FROM cands)
+            WHERE  sf2.mobile_number IN (SELECT mobile_number FROM cands)
         ) sf
         WHERE sf.rn = 1
     ),
@@ -451,15 +454,15 @@ BEGIN
                        ORDER BY     sp2.last_updated DESC
                    ) AS rn
             FROM   tbl_subscriber_profiles sp2
-            WHERE  sp2.model_category COLLATE utf8mb4_unicode_ci = 'not_qualified'
-              AND  (p_mobile_number IS NULL OR BINARY sp2.mobile_number = BINARY p_mobile_number)
+            WHERE  sp2.model_category = 'not_qualified'
+              AND  (p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number)
         ) sp
         WHERE sp.rn = 1
           AND NOT EXISTS (
               SELECT 1
               FROM   tbl_rejection_reasons rr
-              WHERE  BINARY rr.mobile_number = BINARY sp.mobile_number
-                AND  rr.reason_code COLLATE utf8mb4_unicode_ci = 'LOW_TURNOVER'
+              WHERE  rr.mobile_number = sp.mobile_number
+                AND  rr.reason_code = 'LOW_TURNOVER'
           )
     )
     SELECT
@@ -531,15 +534,15 @@ BEGIN
                        ORDER BY     sp2.last_updated DESC
                    ) AS rn
             FROM   tbl_subscriber_profiles sp2
-            WHERE  sp2.model_category COLLATE utf8mb4_unicode_ci = 'not_qualified'
-              AND  (p_mobile_number IS NULL OR BINARY sp2.mobile_number = BINARY p_mobile_number)
+            WHERE  sp2.model_category = 'not_qualified'
+              AND  (p_mobile_number IS NULL OR sp2.mobile_number = p_mobile_number)
         ) sp
         WHERE sp.rn = 1
           AND NOT EXISTS (
               SELECT 1
               FROM   tbl_rejection_reasons rr
-              WHERE  BINARY rr.mobile_number = BINARY sp.mobile_number
-                AND  rr.reason_code COLLATE utf8mb4_unicode_ci = 'HIGH_CREDIT_RISK'
+              WHERE  rr.mobile_number = sp.mobile_number
+                AND  rr.reason_code = 'HIGH_CREDIT_RISK'
           )
     )
     SELECT

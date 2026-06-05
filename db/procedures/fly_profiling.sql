@@ -28,13 +28,12 @@ BEGIN
 
     DECLARE CONTINUE HANDLER FOR NOT FOUND BEGIN END;
 
-    -- Pin session + parameter collation before any LIKE or column comparison.
-    -- MySQL 8 defaults to utf8mb4_0900_ai_ci; schema/procedures use
-    -- utf8mb4_unicode_ci.  Without this, Error 1267 fires on LIKE '0%' and on
-    -- `mobile_number = ip_mobile_number` when table columns were not converted
-    -- by migration 0018.
+    -- Pin the session collation so every string LITERAL in this procedure
+    -- (LIKE '%...%', = 'qualified', etc.) is utf8mb4_unicode_ci, regardless of
+    -- the caller's connection default (MySQL 8 defaults to utf8mb4_0900_ai_ci).
+    -- Column-vs-parameter comparisons are matched by aligning the table columns
+    -- to utf8mb4_unicode_ci in migration 0018.  Both together prevent Error 1267.
     SET collation_connection = 'utf8mb4_unicode_ci';
-    SET ip_mobile_number = ip_mobile_number COLLATE utf8mb4_unicode_ci;
 
     -- -------------------------------------------------------------------------
     -- Normalise the input to the international format (254xxx).
@@ -49,19 +48,15 @@ BEGIN
         SET ip_mobile_number = SUBSTRING(ip_mobile_number, 2);
     END IF;
 
-    -- CONCAT/SUBSTRING can still pick up a different collation; re-pin after
-    -- normalisation so every downstream comparison uses utf8mb4_unicode_ci.
-    SET ip_mobile_number = ip_mobile_number COLLATE utf8mb4_unicode_ci;
-
     SELECT mobile_number INTO update_check
     FROM   customer_credit_limit
-    WHERE  BINARY mobile_number = BINARY ip_mobile_number
+    WHERE  mobile_number = ip_mobile_number
     LIMIT  1;
 
     SET month1 = (
         SELECT COALESCE(SUM(amount), 0)
         FROM   tbl_raw_mpesa_statements
-        WHERE  BINARY mobile_number = BINARY ip_mobile_number
+        WHERE  mobile_number = ip_mobile_number
           AND  amount           > 0
         GROUP  BY DATE_FORMAT(transaction_date, '%Y-%m')
         ORDER  BY DATE_FORMAT(transaction_date, '%Y-%m') DESC
@@ -71,7 +66,7 @@ BEGIN
     SET month2 = (
         SELECT COALESCE(SUM(amount), 0)
         FROM   tbl_raw_mpesa_statements
-        WHERE  BINARY mobile_number = BINARY ip_mobile_number
+        WHERE  mobile_number = ip_mobile_number
           AND  amount           > 0
         GROUP  BY DATE_FORMAT(transaction_date, '%Y-%m')
         ORDER  BY DATE_FORMAT(transaction_date, '%Y-%m') DESC
@@ -81,7 +76,7 @@ BEGIN
     SET month3 = (
         SELECT COALESCE(SUM(amount), 0)
         FROM   tbl_raw_mpesa_statements
-        WHERE  BINARY mobile_number = BINARY ip_mobile_number
+        WHERE  mobile_number = ip_mobile_number
           AND  amount           > 0
         GROUP  BY DATE_FORMAT(transaction_date, '%Y-%m')
         ORDER  BY DATE_FORMAT(transaction_date, '%Y-%m') DESC
@@ -91,7 +86,7 @@ BEGIN
     SET age_days = (
         SELECT DATEDIFF(CURDATE(), DATE(MIN(transaction_date)))
         FROM   tbl_raw_mpesa_statements
-        WHERE  BINARY mobile_number = BINARY ip_mobile_number
+        WHERE  mobile_number = ip_mobile_number
     );
 
     -- -------------------------------------------------------------------------
@@ -112,61 +107,61 @@ BEGIN
     FROM (
         SELECT
             amount,
-            (    details COLLATE utf8mb4_unicode_ci LIKE '%overdraft of credit party%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%m-pesa overdraw%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%od loan%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%tala loan%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%branch microfinance%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%zenka digital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%timiza%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%m-kopa%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%h- fund%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%h-fund%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%hustler fund%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%hfund savings%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%term loan disbursement%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%loop b2c%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%loop business%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%zash loan%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%zillions credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%chelete credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%payablu credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%chapeo capital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%creditarea capital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%loan plus digital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%simplepay capital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%ceres tech%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%zamaradi capital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%fourth generation capital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%mular credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%ajax credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%mkulimapay credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%risine credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%pesa kuu credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%goldstep capital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%azura credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%flashpesa%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%impala credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%platinum credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%bytech credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%getcash capital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%milestone credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%marble capital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%sure cred capital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%finberry capital%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%inspire credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%fast credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%brisk credit%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%okash%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%mshwari%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%fairmoney%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%ipesa%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%kopesh%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%lendplus%'
-              OR details COLLATE utf8mb4_unicode_ci LIKE '%opesa%'
+            (    details LIKE '%overdraft of credit party%'
+              OR details LIKE '%m-pesa overdraw%'
+              OR details LIKE '%od loan%'
+              OR details LIKE '%tala loan%'
+              OR details LIKE '%branch microfinance%'
+              OR details LIKE '%zenka digital%'
+              OR details LIKE '%timiza%'
+              OR details LIKE '%m-kopa%'
+              OR details LIKE '%h- fund%'
+              OR details LIKE '%h-fund%'
+              OR details LIKE '%hustler fund%'
+              OR details LIKE '%hfund savings%'
+              OR details LIKE '%term loan disbursement%'
+              OR details LIKE '%loop b2c%'
+              OR details LIKE '%loop business%'
+              OR details LIKE '%zash loan%'
+              OR details LIKE '%zillions credit%'
+              OR details LIKE '%chelete credit%'
+              OR details LIKE '%payablu credit%'
+              OR details LIKE '%chapeo capital%'
+              OR details LIKE '%creditarea capital%'
+              OR details LIKE '%loan plus digital%'
+              OR details LIKE '%simplepay capital%'
+              OR details LIKE '%ceres tech%'
+              OR details LIKE '%zamaradi capital%'
+              OR details LIKE '%fourth generation capital%'
+              OR details LIKE '%mular credit%'
+              OR details LIKE '%ajax credit%'
+              OR details LIKE '%mkulimapay credit%'
+              OR details LIKE '%risine credit%'
+              OR details LIKE '%pesa kuu credit%'
+              OR details LIKE '%goldstep capital%'
+              OR details LIKE '%azura credit%'
+              OR details LIKE '%flashpesa%'
+              OR details LIKE '%impala credit%'
+              OR details LIKE '%platinum credit%'
+              OR details LIKE '%bytech credit%'
+              OR details LIKE '%getcash capital%'
+              OR details LIKE '%milestone credit%'
+              OR details LIKE '%marble capital%'
+              OR details LIKE '%sure cred capital%'
+              OR details LIKE '%finberry capital%'
+              OR details LIKE '%inspire credit%'
+              OR details LIKE '%fast credit%'
+              OR details LIKE '%brisk credit%'
+              OR details LIKE '%okash%'
+              OR details LIKE '%mshwari%'
+              OR details LIKE '%fairmoney%'
+              OR details LIKE '%ipesa%'
+              OR details LIKE '%kopesh%'
+              OR details LIKE '%lendplus%'
+              OR details LIKE '%opesa%'
             ) AS is_lender
         FROM tbl_raw_mpesa_statements
-        WHERE BINARY mobile_number = BINARY ip_mobile_number
+        WHERE mobile_number = ip_mobile_number
           AND amount            > 0
           AND transaction_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
     ) dti_src;
@@ -201,14 +196,14 @@ BEGIN
             mobile_number,
             NOW() AS date_created,
             COALESCE(SUM(CASE
-                WHEN transaction_type COLLATE utf8mb4_unicode_ci LIKE '%OTHER%'
-                 AND details COLLATE utf8mb4_unicode_ci LIKE '%Fuliza%'
+                WHEN transaction_type LIKE '%OTHER%'
+                 AND details LIKE '%Fuliza%'
                  AND transaction_date >= DATE_SUB((SELECT max_transaction_date FROM max_date), INTERVAL 180 DAY)
                  AND transaction_date <  (SELECT max_transaction_date FROM max_date)
                 THEN ABS(amount) ELSE 0 END), 0)                              AS flz_sum_amt_6m,
             COUNT(DISTINCT CASE
-                WHEN transaction_type COLLATE utf8mb4_unicode_ci LIKE '%PAYBILL%'
-                 AND details COLLATE utf8mb4_unicode_ci LIKE '%KPLC%'
+                WHEN transaction_type LIKE '%PAYBILL%'
+                 AND details LIKE '%KPLC%'
                  AND transaction_date >= DATE_SUB((SELECT max_transaction_date FROM max_date), INTERVAL 180 DAY)
                  AND transaction_date <  (SELECT max_transaction_date FROM max_date)
                 THEN receipt_no END)                                          AS kplc_paybills_cnt_trns_6m,
@@ -223,24 +218,24 @@ BEGIN
                  AND amount < 0
                 THEN ABS(amount) ELSE 0 END), 0)                              AS all_send_money_sum_amt_6m,
             COUNT(DISTINCT CASE
-                WHEN transaction_type COLLATE utf8mb4_unicode_ci LIKE '%SEND MONEY%'
+                WHEN transaction_type LIKE '%SEND MONEY%'
                  AND transaction_date >= DATE_SUB((SELECT max_transaction_date FROM max_date), INTERVAL 90 DAY)
                  AND transaction_date <  (SELECT max_transaction_date FROM max_date)
                 THEN details END)                                             AS p2p_send_money_cnt_unq_trns_3m,
             COUNT(DISTINCT CASE
-                WHEN transaction_type COLLATE utf8mb4_unicode_ci LIKE '%RECEIVED MONEY%'
+                WHEN transaction_type LIKE '%RECEIVED MONEY%'
                  AND transaction_date >= DATE_SUB((SELECT max_transaction_date FROM max_date), INTERVAL 90 DAY)
                  AND transaction_date <  (SELECT max_transaction_date FROM max_date)
                 THEN details END)                                             AS p2p_received_money_cnt_unq_trns_3m,
             COALESCE(SUM(CASE
-                WHEN transaction_type COLLATE utf8mb4_unicode_ci LIKE '%OTHER%'
-                 AND details COLLATE utf8mb4_unicode_ci LIKE '%Bank%'
+                WHEN transaction_type LIKE '%OTHER%'
+                 AND details LIKE '%Bank%'
                  AND amount < 0
                  AND transaction_date >= DATE_SUB((SELECT max_transaction_date FROM max_date), INTERVAL 180 DAY)
                  AND transaction_date <  (SELECT max_transaction_date FROM max_date)
                 THEN ABS(amount) ELSE 0 END), 0)                              AS bank_deposit_sum_amt_6m,
             COALESCE(SUM(CASE
-                WHEN transaction_type COLLATE utf8mb4_unicode_ci LIKE '%RECEIVED MONEY%'
+                WHEN transaction_type LIKE '%RECEIVED MONEY%'
                  AND transaction_date >= DATE_SUB((SELECT max_transaction_date FROM max_date), INTERVAL 180 DAY)
                  AND transaction_date <  (SELECT max_transaction_date FROM max_date)
                 THEN amount ELSE 0 END), 0)                                   AS p2p_received_money_sum_amt_6m,
@@ -255,7 +250,7 @@ BEGIN
                  AND amount < 0
                 THEN ABS(amount) ELSE 0 END), 0)                              AS all_send_money_sum_amt_3m,
             COUNT(DISTINCT CASE
-                WHEN transaction_type COLLATE utf8mb4_unicode_ci LIKE '%RECEIVED MONEY%'
+                WHEN transaction_type LIKE '%RECEIVED MONEY%'
                  AND transaction_date >= DATE_SUB((SELECT max_transaction_date FROM max_date), INTERVAL 30 DAY)
                  AND transaction_date <  (SELECT max_transaction_date FROM max_date)
                 THEN details END)                                             AS p2p_received_money_cnt_unq_trns_1m,
@@ -264,19 +259,19 @@ BEGIN
                  AND transaction_date <  (SELECT max_transaction_date FROM max_date)
                 THEN balance END), 0)                                         AS avg_bal_3m,
             COALESCE(SUM(CASE
-                WHEN transaction_type COLLATE utf8mb4_unicode_ci LIKE '%OTHER%'
-                 AND details COLLATE utf8mb4_unicode_ci LIKE '%Merchant Payment%'
+                WHEN transaction_type LIKE '%OTHER%'
+                 AND details LIKE '%Merchant Payment%'
                  AND transaction_date >= DATE_SUB((SELECT max_transaction_date FROM max_date), INTERVAL 90 DAY)
                  AND transaction_date <  (SELECT max_transaction_date FROM max_date)
                 THEN ABS(amount) ELSE 0 END), 0)                              AS merch_sum_amt_3m,
             COUNT(DISTINCT CASE
-                WHEN transaction_type COLLATE utf8mb4_unicode_ci LIKE '%OTHER%'
-                 AND details COLLATE utf8mb4_unicode_ci LIKE '%BET%'
+                WHEN transaction_type LIKE '%OTHER%'
+                 AND details LIKE '%BET%'
                  AND transaction_date >= DATE_SUB((SELECT max_transaction_date FROM max_date), INTERVAL 90 DAY)
                  AND transaction_date <  (SELECT max_transaction_date FROM max_date)
                 THEN receipt_no END)                                          AS bet_cnt_trns_3m
         FROM   tbl_raw_mpesa_statements
-        WHERE  BINARY mobile_number = BINARY ip_mobile_number
+        WHERE  mobile_number = ip_mobile_number
         GROUP  BY mobile_number
     ),
     derived_features AS (
@@ -388,7 +383,7 @@ BEGIN
             ROW_NUMBER() OVER (PARTITION BY mobile_number
                                ORDER BY date_created DESC) AS rn
         FROM  tbl_scoring_features
-        WHERE BINARY mobile_number = BINARY ip_mobile_number
+        WHERE mobile_number = ip_mobile_number
     ) AS latest_records
     WHERE rn = 1;
 
@@ -467,7 +462,7 @@ BEGIN
              var_total_inflow_txn_count, var_lender_inflow_txn_count);
 
         DELETE FROM customer_credit_limit
-        WHERE  BINARY mobile_number = BINARY ip_mobile_number;
+        WHERE  mobile_number = ip_mobile_number;
 
         INSERT INTO customer_credit_limit
             (mobile_number, credit_limit, profiling_date, profiling_category)
