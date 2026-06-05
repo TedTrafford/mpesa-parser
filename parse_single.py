@@ -243,6 +243,7 @@ def call_fly_profiling(mobile_number: str) -> str:
     try:
         engine = get_engine()
         with engine.begin() as conn:
+            conn.execute(text("SET collation_connection = 'utf8mb4_unicode_ci'"))
             conn.execute(text("CALL fly_profiling(:phone)"), {"phone": mobile_number})
         print(f"[profiling] fly_profiling('{mobile_number}') completed")
         return "OK"
