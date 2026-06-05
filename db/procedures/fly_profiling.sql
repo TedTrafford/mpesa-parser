@@ -1,4 +1,8 @@
-CREATE DEFINER=`staging`@`%` PROCEDURE `Data_Science`.`fly_profiling`(
+DROP PROCEDURE IF EXISTS `Data_Science`.`fly_profiling`;
+
+DELIMITER $$
+
+CREATE DEFINER=`production`@`%` PROCEDURE `Data_Science`.`fly_profiling`(
     IN  ip_mobile_number  VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
 )
 BEGIN
@@ -36,6 +40,13 @@ BEGIN
     ELSEIF ip_mobile_number LIKE '+%' THEN
         SET ip_mobile_number = SUBSTRING(ip_mobile_number, 2);
     END IF;
+
+    -- CONCAT/SUBSTRING and string literals above inherit the connection
+    -- collation (utf8mb4_0900_ai_ci on MySQL 8), which clashes with the
+    -- utf8mb4_unicode_ci columns and raises Error 1267 on every later
+    -- `mobile_number = ip_mobile_number` comparison.  Pin the value back to
+    -- the schema collation so all comparisons below use one consistent one.
+    SET ip_mobile_number = ip_mobile_number COLLATE utf8mb4_unicode_ci;
 
     SELECT mobile_number INTO update_check
     FROM   customer_credit_limit
@@ -405,18 +416,18 @@ BEGIN
         WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 7 THEN 7000
         WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 6 THEN 6000
         WHEN age_days >= 90 AND risk_segment = 8 AND turnover_segment = 5 THEN 5000
-        
+
         WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 8 THEN 8000
         WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 7 THEN 6000
         WHEN age_days >= 90 AND risk_segment = 7 AND turnover_segment = 6 THEN 5000
 
         WHEN age_days >= 90 AND risk_segment = 6 AND turnover_segment = 8 THEN 6000
         WHEN age_days >= 90 AND risk_segment = 6 AND turnover_segment = 7 THEN 5000
-        
+
         WHEN age_days >= 90 AND risk_segment = 5 AND turnover_segment = 8 THEN 5000
 
         ELSE 0
-    END; 
+    END;
 
     -- Qualification must mirror the credit-limit matrix above: only combinations
     -- that receive a non-zero limit are marked qualified.
@@ -485,4 +496,6 @@ BEGIN
         CALL sp_populate_rejection_reasons(ip_mobile_number);
     END IF;
 
-END
+END$$
+
+DELIMITER ;

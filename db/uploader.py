@@ -159,6 +159,17 @@ def _deploy_all_procedures(conn) -> None:
             )
             proc_sql = re.sub(_custom_delim + r"\s*$", "", proc_sql.rstrip())
 
+        # Strip any standalone DROP PROCEDURE statement.  The .sql files carry
+        # one so they paste cleanly into clients like DBeaver, but the deployer
+        # issues its own DROP below.  Leaving it would make proc_sql a
+        # multi-statement string, which the DB driver rejects.
+        proc_sql = re.sub(
+            r"^\s*DROP\s+PROCEDURE\s+(?:IF\s+EXISTS\s+)?[^;]+;\s*",
+            "",
+            proc_sql,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+
         # Strip DEFINER clause.
         proc_sql = re.sub(
             r"DEFINER\s*=\s*`[^`]+`@`[^`]+`\s*",
