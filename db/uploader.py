@@ -70,6 +70,13 @@ COLUMN_MAP = {
 
 
 
+def deploy_procedures() -> None:
+    """Redeploy every .sql procedure body in db/procedures/ (excludes *_drop.sql)."""
+    engine = get_engine()
+    with engine.begin() as conn:
+        _deploy_all_procedures(conn)
+
+
 def ensure_table_exists() -> None:
     """Apply all pending database migrations and deploy the fly_profiling procedure.
 
@@ -83,8 +90,7 @@ def ensure_table_exists() -> None:
 
     engine = get_engine()
     run_migrations(engine)
-    with engine.begin() as conn:
-        _deploy_all_procedures(conn)
+    deploy_procedures()
 
 # ---------------------------------------------------------------------------
 # Custom pandas to_sql method — INSERT IGNORE so duplicate receipt_no rows
@@ -134,7 +140,11 @@ def _deploy_all_procedures(conn) -> None:
         print("  DB: procedures directory not found — skipping procedure deployment")
         return
 
-    sql_files = sorted(f for f in os.listdir(_PROCEDURES_DIR) if f.endswith(".sql"))
+    sql_files = sorted(
+        f
+        for f in os.listdir(_PROCEDURES_DIR)
+        if f.endswith(".sql") and not f.endswith("_drop.sql")
+    )
     if not sql_files:
         print("  DB: no procedure files found in db/procedures/")
         return
@@ -144,18 +154,22 @@ def _deploy_all_procedures(conn) -> None:
         with open(sql_path, "r", encoding="utf-8", errors="replace") as fh:
             proc_sql = fh.read().strip()
 
-        # Strip DELIMITER directives — DELIMITER is a client-only concept;
-        # the MySQL server protocol does not understand it.  Detect the custom
-        # delimiter declared in the file (e.g. $$), remove all DELIMITER lines,
-        # then strip the trailing custom terminator from the procedure body so
-        # that the CREATE PROCEDURE...END block is sent as a clean single statement.
+        # Strip client-only delimiter directives (DBeaver -- @delimiter / mysql
+        # DELIMITER).  The MySQL wire protocol does not understand them; detect
+        # the custom terminator (e.g. $$), remove directive lines, then strip
+        # the trailing custom terminator so CREATE PROCEDURE...END is one statement.
         _delim_match = re.search(
-            r"^\s*DELIMITER\s+(\S+)\s*$", proc_sql, re.IGNORECASE | re.MULTILINE
+            r"^\s*(?:--\s*@delimiter|DELIMITER)\s+(\S+)\s*$",
+            proc_sql,
+            re.IGNORECASE | re.MULTILINE,
         )
         if _delim_match:
             _custom_delim = re.escape(_delim_match.group(1))
             proc_sql = re.sub(
-                r"^\s*DELIMITER\s+\S+\s*$", "", proc_sql, flags=re.IGNORECASE | re.MULTILINE
+                r"^\s*(?:--\s*@delimiter|DELIMITER)\s+\S+\s*$",
+                "",
+                proc_sql,
+                flags=re.IGNORECASE | re.MULTILINE,
             )
             proc_sql = re.sub(_custom_delim + r"\s*$", "", proc_sql.rstrip())
 

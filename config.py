@@ -57,7 +57,10 @@ DB_LOGS_TABLE = "tbl_file_processing_logs"
 # uses the MySQL 8 server default (utf8mb4_0900_ai_ci) and string comparisons
 # inside stored procedures fail with error 1267.
 MYSQL_CONNECT_ARGS = {
-    "init_command": "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",
+    "init_command": (
+        "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci; "
+        "SET collation_connection = 'utf8mb4_unicode_ci'"
+    ),
 }
 
 # Warn loudly when DB credentials are missing — prevents silent connections to
