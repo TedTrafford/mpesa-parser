@@ -26,7 +26,9 @@
 -- Step 1: Fix mobile_number column type.
 -- MODIFY COLUMN is a no-op when the column is already VARCHAR(20).
 ALTER TABLE `customer_credit_limit`
-    MODIFY COLUMN `mobile_number` VARCHAR(20) NOT NULL DEFAULT '';
+    MODIFY COLUMN `mobile_number` VARCHAR(20)
+        CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+        NOT NULL DEFAULT '';
 
 -- Step 2: Strip the '.0000' decimal artefact from any rows that were
 -- converted from DECIMAL storage (e.g. '254722123456.0000' -> '254722123456').

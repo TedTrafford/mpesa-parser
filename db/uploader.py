@@ -30,7 +30,10 @@ UploadResult = namedtuple("UploadResult", ["inserted", "skipped", "manifest_hash
 
 # Allow imports from the project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_TABLE, DB_LOGS_TABLE, LOG_DIR
+from config import (
+    DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_TABLE, DB_LOGS_TABLE,
+    LOG_DIR, MYSQL_CONNECT_ARGS,
+)
 
 _DB_ERROR_LOG = os.path.join(LOG_DIR, "db_errors.log")
 
@@ -102,7 +105,9 @@ def get_engine():
             f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
             f"@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
         )
-        _engine = create_engine(url, pool_pre_ping=True)
+        _engine = create_engine(
+            url, pool_pre_ping=True, connect_args=MYSQL_CONNECT_ARGS
+        )
     return _engine
 
 

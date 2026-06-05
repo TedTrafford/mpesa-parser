@@ -53,6 +53,13 @@ DB_PASSWORD = os.environ.get("MPESA_DB_PASSWORD", "")
 DB_TABLE      = "tbl_raw_mpesa_statements"
 DB_LOGS_TABLE = "tbl_file_processing_logs"
 
+# Match table/procedure collation (utf8mb4_unicode_ci).  Without this, pymysql
+# uses the MySQL 8 server default (utf8mb4_0900_ai_ci) and string comparisons
+# inside stored procedures fail with error 1267.
+MYSQL_CONNECT_ARGS = {
+    "init_command": "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",
+}
+
 # Warn loudly when DB credentials are missing — prevents silent connections to
 # an unintended database. Does not raise, so non-DB tooling can still import config.
 if not DB_PASSWORD:
