@@ -1,4 +1,11 @@
 import PyPDF2
+from PyPDF2.errors import (
+    PdfReadError,
+    FileNotDecryptedError,
+    EmptyFileError,
+    DependencyError,
+    WrongPasswordError,
+)
 import pandas as pd
 import re
 from datetime import datetime
@@ -67,23 +74,97 @@ def get_pdf_password(pdf_path):
     return password
 
 def extract_text_from_pdf(pdf_path):
-    """Extract text from PDF file."""
+    """Extract text from a (possibly encrypted) PDF file.
+
+    Failures raise ValueError with a specific, human-readable reason so the
+    processing log records *why* a file could not be read (incorrect password,
+    corrupted file, missing password, etc.) instead of a generic library
+    message such as "File has not been decrypted".
+    """
     password = get_pdf_password(pdf_path)
     print(f"Attempting to open PDF with password: {password}")
-    
-    with open(pdf_path, 'rb') as file:
-        reader = PyPDF2.PdfReader(file)
-        # Decrypt the PDF using the password
-        if reader.is_encrypted:
-            reader.decrypt(password)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text()
-    
+
+    filename = os.path.basename(pdf_path)
+
+    # ── 1. File must exist and be a non-empty, readable file ─────────────────
+    if not os.path.isfile(pdf_path):
+        raise ValueError(f"PDF file not found: {pdf_path}")
+    if os.path.getsize(pdf_path) == 0:
+        raise ValueError(f"PDF file is empty (0 bytes): {filename}")
+
+    try:
+        with open(pdf_path, "rb") as file:
+            # ── 2. Parse the PDF structure ───────────────────────────────────
+            # A failure here means the file is not a valid PDF or is
+            # corrupted / truncated rather than encrypted.
+            try:
+                reader = PyPDF2.PdfReader(file)
+            except EmptyFileError as exc:
+                raise ValueError(
+                    f"PDF file is empty or has no readable content: {filename}"
+                ) from exc
+            except PdfReadError as exc:
+                raise ValueError(
+                    f"PDF file is corrupted or not a valid PDF ({filename}): {exc}"
+                ) from exc
+
+            # ── 3. Decrypt, distinguishing missing vs incorrect password ─────
+            if reader.is_encrypted:
+                if not password:
+                    raise ValueError(
+                        f"PDF is password-protected but no password was provided "
+                        f"({filename})"
+                    )
+                try:
+                    result = reader.decrypt(password)
+                except WrongPasswordError as exc:
+                    raise ValueError(
+                        f"PDF decryption failed — incorrect password "
+                        f"(tried '{password}' for {filename})"
+                    ) from exc
+                except DependencyError as exc:
+                    raise ValueError(
+                        f"PDF uses an encryption method that is not supported "
+                        f"({filename}): {exc}"
+                    ) from exc
+                except PdfReadError as exc:
+                    raise ValueError(
+                        f"PDF decryption failed — unsupported or corrupted "
+                        f"encryption ({filename}): {exc}"
+                    ) from exc
+                # PyPDF2 returns PasswordType.NOT_DECRYPTED (== 0) on a wrong
+                # password rather than raising, so check the result explicitly.
+                if not result:
+                    raise ValueError(
+                        f"PDF decryption failed — incorrect password "
+                        f"(tried '{password}' for {filename})"
+                    )
+
+            # ── 4. Extract text, guarding against post-decrypt failures ──────
+            text = ""
+            try:
+                for page in reader.pages:
+                    text += page.extract_text() or ""
+            except FileNotDecryptedError as exc:
+                raise ValueError(
+                    f"PDF could not be decrypted — incorrect password "
+                    f"(tried '{password}' for {filename})"
+                ) from exc
+            except PdfReadError as exc:
+                raise ValueError(
+                    f"PDF is corrupted — failed while reading pages "
+                    f"({filename}): {exc}"
+                ) from exc
+    except ValueError:
+        # Re-raise the specific messages above unchanged.
+        raise
+    except OSError as exc:
+        raise ValueError(f"Could not open PDF file ({filename}): {exc}") from exc
+
     print(f"Extracted text length: {len(text)} characters")
     print("First 200 characters of extracted text:")
     print(text[:200])
-    
+
     return text
 
 def extract_customer_info(text):
@@ -316,8 +397,19 @@ def process_single_file(pdf_path, output_csv=None, password=None, record_id=None
     transactions = parse_mpesa_statement(text, pdf_path)
 
     if not transactions:
-        print("No transactions were parsed from the PDF")
-        return None
+        # Distinguish the two failure modes so the processing log is actionable:
+        #   - empty text  -> extraction/decryption produced nothing
+        #   - text present -> the statement layout did not match TRANSACTION_PATTERN
+        #                     (typically a new Safaricom statement format)
+        if not text or not text.strip():
+            raise ValueError(
+                "No text could be extracted from the PDF "
+                "(possible scanned/image-only or corrupt file)"
+            )
+        raise ValueError(
+            f"No transactions matched the parser pattern "
+            f"({len(text)} chars extracted) — statement layout may have changed"
+        )
 
     # Create DataFrame
     df = pd.DataFrame(transactions)
