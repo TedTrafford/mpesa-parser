@@ -72,14 +72,12 @@ BEGIN
 
             CASE
                 WHEN s.transaction_type IN ('SEND MONEY', 'RECEIVED MONEY')
+                     AND s.details REGEXP '-[[:space:]]*[0-9*]+[[:space:]]+.+'
                 THEN TRIM(
                     REGEXP_REPLACE(
-                        REGEXP_SUBSTR(
-                            s.details,
-                            '-[[:space:]]*[0-9*]+[[:space:]]+(.+)$',
-                            1, 1, NULL, 1
-                        ),
-                        '[[:space:]]+', ' '
+                        REGEXP_REPLACE(s.details, '[[:space:]]+', ' '),
+                        '^.*-[[:space:]]*[0-9*]+[[:space:]]+',
+                        ''
                     )
                 )
             END AS p2p_counterparty,
@@ -286,16 +284,14 @@ BEGIN
             s.mobile_number,
             TRIM(
                 REGEXP_REPLACE(
-                    REGEXP_SUBSTR(
-                        s.details,
-                        '-[[:space:]]*[0-9*]+[[:space:]]+(.+)$',
-                        1, 1, NULL, 1
-                    ),
-                    '[[:space:]]+', ' '
+                    REGEXP_REPLACE(s.details, '[[:space:]]+', ' '),
+                    '^.*-[[:space:]]*[0-9*]+[[:space:]]+',
+                    ''
                 )
             ) AS sender
         FROM tbl_raw_mpesa_statements s
         WHERE s.transaction_type = 'RECEIVED MONEY'
+          AND s.details REGEXP '-[[:space:]]*[0-9*]+[[:space:]]+.+'
     ),
     sender_fanout AS (
         SELECT sender
