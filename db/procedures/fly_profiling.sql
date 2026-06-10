@@ -492,8 +492,8 @@ BEGIN
 
     END IF;
 
-    IF model_category = 'not_qualified' THEN
-        CALL sp_populate_rejection_reasons(ip_mobile_number);
-    END IF;
+    -- Evaluate fraud rules, then surface rejection reasons (credit gates and
+    -- FRAUD_CRITICAL for score >= 80).
+    CALL sp_populate_fraud_rules(ip_mobile_number);
 
 END;

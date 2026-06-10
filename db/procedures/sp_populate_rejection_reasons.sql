@@ -565,4 +565,67 @@ BEGIN
     WHERE (c.age_days IS NULL OR c.age_days >= 90)
       AND c.risk_segment <= 4;
 
+    -- -----------------------------------------------------------------------
+    -- Reason FRAUD_CRITICAL (rank 1)
+    --   Sourced from tbl_fraud_rules where decision = 'Reject' (score >= 80).
+    --   NOT gated on model_category: a critical fraud score is an independent
+    --   hard rejection that overrides credit qualification.
+    --   Idempotent: skips any subscriber that already has this reason_code.
+    -- -----------------------------------------------------------------------
+    INSERT INTO tbl_rejection_reasons
+        (mobile_number, profile_id, reason_rank, reason_code, reason_detail,
+         feature_name, feature_value, score_actual, score_max, score_gap,
+         repayment_probability)
+    WITH fr AS (
+        SELECT *
+        FROM (
+            SELECT f.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY f.mobile_number
+                       ORDER BY     f.evaluated_at DESC
+                   ) AS rn
+            FROM   tbl_fraud_rules f
+            WHERE  f.decision = 'Reject'
+              AND  (p_mobile_number IS NULL OR f.mobile_number = p_mobile_number)
+        ) x
+        WHERE x.rn = 1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM   tbl_rejection_reasons rr
+              WHERE  rr.mobile_number = x.mobile_number
+                AND  rr.reason_code = 'FRAUD_CRITICAL'
+          )
+    ),
+    latest_sp AS (
+        SELECT mobile_number, profile_id, total_score
+        FROM (
+            SELECT sp2.id AS profile_id, sp2.mobile_number, sp2.total_score,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY sp2.mobile_number
+                       ORDER BY     sp2.last_updated DESC
+                   ) AS rn
+            FROM   tbl_subscriber_profiles sp2
+            WHERE  sp2.mobile_number IN (SELECT mobile_number FROM fr)
+        ) y
+        WHERE y.rn = 1
+    )
+    SELECT
+        fr.mobile_number,
+        sp.profile_id,
+        1,
+        'FRAUD_CRITICAL',
+        CONCAT(
+            'Fraud risk score is ', fr.total_score,
+            ' (>= 80: critical fraud / gaming pattern). Automated hard rejection applied; ',
+            'National ID and device fingerprint flagged for blacklisting. Triggered rules: ',
+            COALESCE(NULLIF(fr.triggered_rules, ''), 'n/a'),
+            '.'
+        ),
+        'fraud_total_score',
+        fr.total_score,
+        NULL, NULL, NULL,
+        ROUND(100.0 / (1.0 + EXP(-(COALESCE(sp.total_score, 0) - 100.0) / 35.0)), 2)
+    FROM fr
+    LEFT JOIN latest_sp sp ON sp.mobile_number = fr.mobile_number;
+
 END;

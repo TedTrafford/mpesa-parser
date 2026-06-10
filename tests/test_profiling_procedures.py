@@ -155,8 +155,16 @@ class TestProcedureSources:
     def rejection_sql(self):
         return _read_procedure("sp_populate_rejection_reasons.sql")
 
-    def test_fly_profiling_calls_rejection_procedure(self, fly_profiling_sql):
-        assert "CALL sp_populate_rejection_reasons(ip_mobile_number)" in fly_profiling_sql
+    def test_fly_profiling_calls_fraud_rules_procedure(self, fly_profiling_sql):
+        assert "CALL sp_populate_fraud_rules(ip_mobile_number)" in fly_profiling_sql
+
+    def test_fraud_rules_calls_rejection_procedure(self):
+        fraud_sql = _read_procedure("sp_populate_fraud_rules.sql")
+        assert "CALL sp_populate_rejection_reasons(p_mobile_number)" in fraud_sql
+
+    def test_rejection_includes_fraud_critical(self, rejection_sql):
+        assert "FRAUD_CRITICAL" in rejection_sql
+        assert "tbl_fraud_rules" in rejection_sql
 
     def test_fly_profiling_model_category_uses_credit_limit(
         self, fly_profiling_sql
