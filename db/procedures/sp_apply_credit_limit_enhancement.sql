@@ -7,11 +7,16 @@
 
 CREATE DEFINER=`production`@`%` PROCEDURE `Data_Science`.`sp_apply_credit_limit_enhancement`(
     IN p_mobile_number VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-    IN p_apply         TINYINT(1)   DEFAULT 0
+    IN p_apply         TINYINT(1)
 )
 BEGIN
 
     SET collation_connection = 'utf8mb4_unicode_ci';
+
+    -- MySQL procedure parameters cannot have DEFAULT; treat NULL as evaluate-only.
+    IF p_apply IS NULL THEN
+        SET p_apply = 0;
+    END IF;
 
     IF p_mobile_number IS NOT NULL THEN
         IF p_mobile_number LIKE '0%' THEN

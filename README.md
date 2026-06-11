@@ -557,7 +557,7 @@ CALL sp_apply_credit_limit_enhancement(p_mobile_number, p_apply);
 | Parameter | Type | Description |
 |---|---|---|
 | `p_mobile_number` | `VARCHAR(20)` | Customer mobile (`254xxx`), or `NULL` for batch (all customers with `credit_limit >= 1000`) |
-| `p_apply` | `TINYINT(1)` | `0` = evaluate only; `1` = also update `aleza.credit_profiles` and `customer_credit_limit` |
+| `p_apply` | `TINYINT(1)` | `0` or `NULL` = evaluate only; `1` = also update `aleza.credit_profiles` and `customer_credit_limit` (both parameters are required — MySQL does not support parameter defaults) |
 
 **Data sources:**
 
