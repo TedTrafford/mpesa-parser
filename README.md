@@ -1,6 +1,6 @@
 # M-PESA Statement Parser
 
-Parses Safaricom M-PESA PDF bank statements into structured CSV files and uploads the transactions to a MySQL database.  After each successful parse a credit-scoring stored procedure (`fly_profiling`) runs automatically to compute a credit limit for the customer.  It then calls `sp_populate_fraud_rules`, which evaluates a 12-rule weighted fraud framework and writes results to `tbl_fraud_rules`.  A companion procedure (`sp_populate_rejection_reasons`) explains, in ranked order, why a subscriber was rejected — credit-score gates for `not_qualified` subscribers, and `FRAUD_CRITICAL` for fraud scores ≥ 80 regardless of credit qualification.
+Parses Safaricom M-PESA PDF bank statements into structured CSV files and uploads the transactions to a MySQL database.  After each successful parse a credit-scoring stored procedure (`fly_profiling`) runs automatically to compute a credit limit for the customer.  It then calls `sp_populate_fraud_rules`, which evaluates a 12-rule weighted fraud framework and writes results to `tbl_fraud_rules`.  A companion procedure (`sp_populate_rejection_reasons`) explains, in ranked order, why a subscriber was rejected — credit-score gates for `not_qualified` subscribers, and `FRAUD_CRITICAL` for fraud scores ≥ 80 regardless of credit qualification.  For returning borrowers, `sp_apply_credit_limit_enhancement` evaluates limit increases against the Credit Limit Enhancement Matrix using LMS loan history plus parser analytics.
 
 ---
 
@@ -45,6 +45,13 @@ PDF statement  →  Parser  →  CSV  →  MySQL (tbl_raw_mpesa_statements)
                                            ↓
                                   tbl_rejection_reasons
               (credit gates for not_qualified + FRAUD_CRITICAL for score ≥ 80)
+
+Returning borrowers (on demand / scheduled):
+  aleza.loans + loan_schedules + parser tables
+           ↓
+  sp_apply_credit_limit_enhancement(mobile, apply)
+           ↓
+  tbl_credit_limit_enhancements  →  (optional) aleza.credit_profiles + customer_credit_limit
 ```
 
 Each transaction row extracted from the PDF is deduplicated against the database using a composite key on `(receipt_no, amount)` — re-submitting the same PDF is safe.
@@ -268,7 +275,7 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 | `mobile_number` | `VARCHAR(20)` | International format (`254xxx`) — consistent with all other tables |
 | `credit_limit` | `INT` | Whole-number amounts (0, 5000, 8000, …) |
 | `profiling_date` | `DATETIME` | When `fly_profiling()` last ran for this customer |
-| `profiling_category` | `VARCHAR(20)` | `FTB1` (new customer) or `FTB2` (returning customer) |
+| `profiling_category` | `VARCHAR(20)` | `FTB1` (new), `FTB2` (returning), or `ENHANCED` (after limit increase applied) |
 
 > **Note:** Early deployments stored `mobile_number` and `credit_limit` as `DECIMAL(18,4)`, causing values to display with thousands-separator commas (e.g. `254,722,123,456.0000`). Migrations `0014` and `0015` correct this automatically — `0015` also strips any `.0000` decimal artefacts left in existing rows after the column type change.
 
@@ -310,6 +317,26 @@ Subscribers with `debt_to_income_ratio > 0.50` (50 %) are hard-gated to `not_qua
 | `LOW_TURNOVER` | `turnover_segment` below the minimum required for the subscriber's `risk_segment` (risk 5–8 only) | 2, 3, or 4 |
 | `HIGH_CREDIT_RISK` | `risk_segment ≤ 4` — score too low for any credit-limit assignment | 2, 3, or 4 |
 | `FRAUD_CRITICAL` | Fraud score ≥ 80 in `tbl_fraud_rules` — independent hard rejection; not gated on `model_category` | 1 |
+
+### Key columns — `tbl_credit_limit_enhancements`
+
+| Column | Type | Notes |
+|---|---|---|
+| `customer_id` | `CHAR(36)` | LMS `aleza.customers.id` (UUID) |
+| `mobile_number` | `VARCHAR(20)` | International format (`254xxx`) |
+| `current_limit` | `INT` | Limit before enhancement (from `customer_credit_limit`) |
+| `turnover_segment` | `TINYINT` | 1–8, derived from `three_month_wavg` (same thresholds as `fly_profiling`) |
+| `limit_band` | `VARCHAR(20)` | `1k_5k`, `5k_10k`, `10k_20k`, `20k_30k`, or `30k_40k` |
+| `enhancement_pct` | `DECIMAL(5,2)` | Matrix percentage (e.g. `40.00` = 40 %) |
+| `enhanced_limit` | `INT` | `ROUND(current_limit × (1 + enhancement_pct / 100))` |
+| `is_eligible` | `TINYINT(1)` | `1` only when all five eligibility gates pass and a matrix cell exists |
+| `eligibility_detail` | `TEXT` | Semicolon-separated reasons when ineligible |
+| `applied` | `TINYINT(1)` | `1` when `p_apply = 1` and the enhanced limit was written |
+| `last_loan_days_late` | `INT` | Days between final due date and final payment on last closed loan |
+| `max_arrears_days_1y` | `INT` | Peak `days_overdue` on any installment in the last 12 months |
+| `limit_age_days` | `INT` | Days since `customer_credit_limit.profiling_date` |
+| `fraud_decision` | `VARCHAR(20)` | Latest decision from `tbl_fraud_rules` |
+| `debt_to_income_ratio` | `DECIMAL(7,4)` | Latest DTI from `tbl_subscriber_profiles` |
 
 ---
 
@@ -358,6 +385,13 @@ After each successful parse, `fly_profiling(<mobile_number>)` is called automati
 8. Calls `sp_populate_fraud_rules(<mobile_number>)`, which evaluates all 12 fraud rules, writes `tbl_fraud_rules`, then calls `sp_populate_rejection_reasons` for credit gates and `FRAUD_CRITICAL` rejections.
 
 Stored procedures in `db/procedures/` are (re)deployed on every startup via `python -m db.deploy_procedures` (also run automatically by `ensure_table_exists()`). Edit a `.sql` file and redeploy to pick up changes.
+
+| Procedure | When it runs | Purpose |
+|---|---|---|
+| `fly_profiling` | After every successful PDF parse | Initial credit scoring and limit assignment |
+| `sp_populate_fraud_rules` | End of `fly_profiling` | 12-rule fraud evaluation → `tbl_fraud_rules` |
+| `sp_populate_rejection_reasons` | End of `sp_populate_fraud_rules` | Ranked rejection reasons + `FRAUD_CRITICAL` |
+| `sp_apply_credit_limit_enhancement` | On demand / scheduled (not auto on parse) | Limit increase for eligible returning borrowers |
 
 ### Credit limit matrix
 
@@ -478,44 +512,101 @@ Table DDL is in migration `0019`. Procedure source: `db/procedures/sp_populate_f
 
 ### Credit limit enhancement
 
-`sp_apply_credit_limit_enhancement` evaluates returning borrowers against the **Credit Limit Enhancement Matrix** (current limit band × turnover segment) and writes results to `tbl_credit_limit_enhancements`. It joins parser tables in `Data_Science` with LMS loan tables in the `aleza` database on the same MySQL host (`customers`, `loans`, `loan_schedules`, `credit_profiles`).
+`sp_apply_credit_limit_enhancement(p_mobile_number, p_apply)` evaluates returning borrowers against the **Credit Limit Enhancement Matrix** (current limit band on the Y-axis × turnover segment on the X-axis). Results are written to `tbl_credit_limit_enhancements`. The procedure joins parser tables in `Data_Science` with LMS loan tables in the `aleza` database on the same MySQL host.
+
+**Signature:**
+
+```sql
+CALL sp_apply_credit_limit_enhancement(p_mobile_number, p_apply);
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `p_mobile_number` | `VARCHAR(20)` | Customer mobile (`254xxx`), or `NULL` for batch (all customers with `credit_limit >= 1000`) |
+| `p_apply` | `TINYINT(1)` | `0` = evaluate only; `1` = also update `aleza.credit_profiles` and `customer_credit_limit` |
+
+**Data sources:**
+
+| Domain | Tables | Database |
+|---|---|---|
+| Parser / analytics | `customer_credit_limit`, `tbl_subscriber_profiles`, `tbl_fraud_rules` | `Data_Science` |
+| Loan management | `customers`, `loans`, `loan_schedules`, `credit_profiles` | `aleza` |
 
 **Eligibility gates (all required):**
 
 | # | Condition | Source |
 |---|---|---|
-| 1 | Last closed loan repaid ≤ 3 days after final due date | `aleza.loans`, `aleza.loan_schedules` |
-| 2 | No loan in last 12 months exceeded 90 days overdue | `aleza.loan_schedules.days_overdue` |
-| 3 | Current limit held ≥ 14 days | `customer_credit_limit.profiling_date` |
-| 4 | Not fraud-flagged (`Reject` / `Manual Review`) | `tbl_fraud_rules` |
-| 5 | Debt-to-income ratio < 50 % | `tbl_subscriber_profiles` |
+| 1 | Last closed loan repaid ≤ 3 days after final installment due date | `aleza.loans`, `aleza.loan_schedules` |
+| 2 | No loan in the last 12 months had any installment > 90 days overdue | `aleza.loan_schedules.days_overdue` |
+| 3 | Current limit held for ≥ 14 days | `customer_credit_limit.profiling_date` |
+| 4 | Not fraud-flagged (`Reject` or `Manual Review`) | `tbl_fraud_rules` |
+| 5 | Debt-to-income ratio < 50 % (not actively lender-dependent) | `tbl_subscriber_profiles.debt_to_income_ratio` |
 
-**Enhancement matrix** (% increase by limit band × turnover segment 1–8):
+Customers with no closed loan fail gate 1 (`No closed loan on record`).
 
-| Limit band | T8 | T7 | T6 | T5 | T4 | T3 | T2 | T1 |
+**Turnover segments** (X-axis — same `three_month_wavg` thresholds as `fly_profiling`):
+
+| Segment | 3-month weighted avg turnover (KES) | Label |
+|---|---|---|
+| 8 | > 107,556 | > 153k |
+| 7 | > 60,463 | 107k |
+| 6 | > 39,179 | 60k |
+| 5 | > 23,895 | 39k |
+| 4 | > 16,027 | 23k |
+| 3 | > 12,561 | 16k |
+| 2 | > 9,841 | 12k |
+| 1 | ≤ 9,841 | 9k |
+
+**Limit bands** (Y-axis — based on `customer_credit_limit.credit_limit`):
+
+| Band | Range (KES) |
+|---|---|
+| `1k_5k` | 1,000 – 5,000 |
+| `5k_10k` | 5,001 – 10,000 |
+| `10k_20k` | 10,001 – 20,000 |
+| `20k_30k` | 20,001 – 30,000 |
+| `30k_40k` | 30,001 – 40,000 |
+
+**Enhancement matrix** (% increase applied to `current_limit`):
+
+| Limit band \ Turnover | 8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 |
 |---|---|---|---|---|---|---|---|---|
-| 30k–40k | 10 % | 5 % | | | | | | |
-| 20k–30k | 20 % | 10 % | 5 % | | | | | |
-| 10k–20k | 30 % | 20 % | 8 % | 10 % | | | | |
-| 5k–10k | 40 % | 30 % | 20 % | 15 % | 3 % | | | |
-| 1k–5k | 60 % | 50 % | 50 % | 40 % | 30 % | 20 % | 5 % | |
+| 30k–40k | 10 % | 5 % | — | — | — | — | — | — |
+| 20k–30k | 20 % | 10 % | 5 % | — | — | — | — | — |
+| 10k–20k | 30 % | 20 % | 8 % | 10 % | — | — | — | — |
+| 5k–10k | 40 % | 30 % | 20 % | 15 % | 3 % | — | — | — |
+| 1k–5k | 60 % | 50 % | 50 % | 40 % | 30 % | 20 % | 5 % | — |
 
-Turnover segments use the same `three_month_wavg` thresholds as `fly_profiling`.
+Empty cells mean no enhancement is available for that combination.
+
+**Examples:**
 
 ```sql
--- Evaluate only (no limit update)
+-- Evaluate one customer (dry run)
 CALL sp_apply_credit_limit_enhancement('254722123456', 0);
 
--- Evaluate all customers with a current limit >= 1 000
+-- Batch evaluate all customers with limit >= 1 000
 CALL sp_apply_credit_limit_enhancement(NULL, 0);
 
--- Evaluate and apply enhanced limits (updates aleza.credit_profiles + customer_credit_limit)
+-- Evaluate and apply (writes enhanced limit)
 CALL sp_apply_credit_limit_enhancement('254722123456', 1);
+
+-- Review eligible customers
+SELECT mobile_number, current_limit, turnover_segment, enhancement_pct,
+       enhanced_limit, eligibility_detail
+FROM   tbl_credit_limit_enhancements
+WHERE  is_eligible = 1
+ORDER  BY evaluated_at DESC;
 ```
+
+When `p_apply = 1` and the customer is eligible, the procedure updates:
+
+- `aleza.credit_profiles.credit_limit` and `available_credit`
+- `customer_credit_limit.credit_limit` with `profiling_category = 'ENHANCED'`
 
 Table DDL: migration `0020`. Procedure: `db/procedures/sp_apply_credit_limit_enhancement.sql`.
 
-> **Note:** Change the `aleza.` schema prefix in the procedure if your LMS database name differs on the server.
+> **Note:** Change the `aleza.` schema prefix in the procedure if your LMS database name differs on the server (production host `65.20.86.247:3306`).
 
 ---
 
@@ -540,7 +631,7 @@ Tests run without a live database. The suite includes:
 | `tests/test_config.py` | Mobile number normalisation, transaction type mapping |
 | `tests/test_parser.py` | PDF parsing, manifest hashing, metadata attachment |
 | `tests/test_parse_single.py` | Phone validation and balance continuity checks |
-| `tests/test_profiling_procedures.py` | Credit limit matrix, `model_category` alignment, rejection reason thresholds, fraud procedure wiring, and SQL procedure source checks |
+| `tests/test_profiling_procedures.py` | Credit limit matrix, `model_category` alignment, rejection reason thresholds, fraud/enhancement procedure wiring, and SQL procedure source checks |
 
 Credit-scoring rule tests use `tests/profiling_rules.py`, a Python reference implementation that mirrors the logic in `db/procedures/fly_profiling.sql` and `db/procedures/sp_populate_rejection_reasons.sql`. Run just the profiling tests:
 
