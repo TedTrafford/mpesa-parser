@@ -305,6 +305,9 @@ BEGIN
         debt_to_income_ratio
     FROM scored;
 
+    -- Surface ranked reasons for ineligible customers.
+    CALL sp_populate_LEM_rejection_reasons(p_mobile_number);
+
     IF p_apply = 1 THEN
         UPDATE aleza.credit_profiles cp
         INNER JOIN tbl_credit_limit_enhancements e

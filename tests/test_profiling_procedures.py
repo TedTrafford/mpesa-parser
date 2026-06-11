@@ -172,6 +172,24 @@ class TestProcedureSources:
         assert "aleza.loans" in enhancement_sql
         assert "enhancement_pct" in enhancement_sql
 
+    def test_enhancement_calls_lem_rejection_procedure(self):
+        enhancement_sql = _read_procedure("sp_apply_credit_limit_enhancement.sql")
+        assert "CALL sp_populate_LEM_rejection_reasons(p_mobile_number)" in enhancement_sql
+
+    def test_lem_rejection_reason_codes(self):
+        lem_sql = _read_procedure("sp_populate_LEM_rejection_reasons.sql")
+        for code in (
+            "LEM_FRAUD_FLAG",
+            "LEM_EXCESSIVE_ARREARS",
+            "LEM_NO_CLOSED_LOAN",
+            "LEM_LATE_LOAN_REPAYMENT",
+            "LEM_HIGH_DEBT_TO_INCOME",
+            "LEM_LIMIT_TENURE_INSUFFICIENT",
+            "LEM_NO_MATRIX_CELL",
+        ):
+            assert code in lem_sql
+        assert "tbl_LEM_rejection_reasons" in lem_sql
+
     def test_fly_profiling_model_category_uses_credit_limit(
         self, fly_profiling_sql
     ):
