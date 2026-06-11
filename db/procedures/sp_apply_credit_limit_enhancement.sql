@@ -2,8 +2,9 @@
 -- then Ctrl+Enter.  Do NOT include these comment lines.
 -- Easiest:  python -m db.deploy_procedures
 --
--- LMS tables are qualified as staging.* (customers, loans, loan_schedules,
--- credit_profiles). Change the prefix if your live-app database name differs.
+-- LMS tables are qualified as staging.* (customers, loans, repayments,
+-- credit_profiles). Soft-delete uses deleted_at IS NULL. Change the prefix if
+-- your live-app database name differs.
 
 CREATE DEFINER=`production`@`%` PROCEDURE `Data_Science`.`sp_apply_credit_limit_enhancement`(
     IN p_mobile_number VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
@@ -47,7 +48,7 @@ BEGIN
                 ELSE TRIM(c.phone_number)
             END AS mobile_number
         FROM staging.customers c
-        WHERE (c.soft_delete IS NULL OR c.soft_delete = 0)
+        WHERE c.deleted_at IS NULL
           AND COALESCE(c.is_active, 1) = 1
           AND COALESCE(c.blacklisted, 0) = 0
     ),
@@ -96,42 +97,48 @@ BEGIN
     ),
 
     last_loan AS (
-        SELECT customer_id, loan_id, closed_date, last_payment_date
+        SELECT customer_id, loan_id, closed_date, last_payment_date, maturity_date
         FROM (
             SELECT
-                l.customer_id,
+                c.id AS customer_id,
                 l.id AS loan_id,
                 l.closed_date,
                 l.last_payment_date,
+                l.maturity_date,
                 ROW_NUMBER() OVER (
-                    PARTITION BY l.customer_id
+                    PARTITION BY c.id
                     ORDER BY     l.closed_date DESC, l.id DESC
                 ) AS rn
-            FROM staging.loans l
-            WHERE l.loan_status = 'closed'
-              AND (l.soft_delete IS NULL OR l.soft_delete = 0)
+            FROM staging.customers c
+            INNER JOIN staging.loans l ON l.customer_id = c.id
+            WHERE c.deleted_at IS NULL
+              AND l.deleted_at IS NULL
+              AND l.loan_status = 'closed'
         ) x
         WHERE rn = 1
+    ),
+
+    last_loan_repayment AS (
+        SELECT
+            r.loan_id,
+            MAX(r.payment_date) AS final_paid_date
+        FROM staging.repayments r
+        WHERE r.deleted_at IS NULL
+          AND r.payment_status = 'posted'
+        GROUP BY r.loan_id
     ),
 
     last_loan_payment AS (
         SELECT
             ll.customer_id,
-            fin.due_date AS final_due_date,
+            ll.maturity_date AS final_due_date,
             COALESCE(
-                fin.paid_date,
+                lr.final_paid_date,
                 DATE(ll.closed_date),
                 DATE(ll.last_payment_date)
             ) AS final_paid_date
         FROM last_loan ll
-        JOIN LATERAL (
-            SELECT ls.due_date, ls.paid_date
-            FROM   staging.loan_schedules ls
-            WHERE  ls.loan_id = ll.loan_id
-              AND  (ls.soft_delete IS NULL OR ls.soft_delete = 0)
-            ORDER  BY ls.installment_number DESC
-            LIMIT  1
-        ) fin ON TRUE
+        LEFT JOIN last_loan_repayment lr ON lr.loan_id = ll.loan_id
     ),
 
     gate_last_payment AS (
@@ -144,14 +151,14 @@ BEGIN
 
     arrears_1y AS (
         SELECT
-            l.customer_id,
-            MAX(ls.days_overdue) AS max_arrears_days
-        FROM staging.loans l
-        INNER JOIN staging.loan_schedules ls ON ls.loan_id = l.id
-        WHERE (l.soft_delete IS NULL OR l.soft_delete = 0)
-          AND (ls.soft_delete IS NULL OR ls.soft_delete = 0)
+            c.id AS customer_id,
+            MAX(l.days_overdue) AS max_arrears_days
+        FROM staging.customers c
+        INNER JOIN staging.loans l ON l.customer_id = c.id
+        WHERE c.deleted_at IS NULL
+          AND l.deleted_at IS NULL
           AND l.disbursement_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
-        GROUP BY l.customer_id
+        GROUP BY c.id
     ),
 
     gate_arrears AS (
@@ -327,7 +334,7 @@ BEGIN
           AND  e.enhanced_limit IS NOT NULL
           AND  e.enhanced_limit > e.current_limit
           AND  (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number)
-          AND  (cp.soft_delete IS NULL OR cp.soft_delete = 0);
+          AND  cp.deleted_at IS NULL;
 
         UPDATE customer_credit_limit ccl
         INNER JOIN tbl_credit_limit_enhancements e

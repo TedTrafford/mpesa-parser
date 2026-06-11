@@ -564,14 +564,14 @@ CALL sp_apply_credit_limit_enhancement(p_mobile_number, p_apply);
 | Domain | Tables | Database |
 |---|---|---|
 | Parser / analytics | `customer_credit_limit`, `tbl_subscriber_profiles`, `tbl_fraud_rules` | `Data_Science` |
-| Loan management | `customers`, `loans`, `loan_schedules`, `credit_profiles` | `staging` |
+| Loan management | `customers`, `loans`, `repayments`, `credit_profiles` | `staging` |
 
 **Eligibility gates (all required):**
 
 | # | Condition | Source |
 |---|---|---|
-| 1 | Last closed loan repaid ≤ 3 days after final installment due date | `staging.loans`, `staging.loan_schedules` |
-| 2 | No loan in the last 12 months had any installment > 90 days overdue | `staging.loan_schedules.days_overdue` |
+| 1 | Last closed loan repaid ≤ 3 days after maturity date | `staging.customers`, `staging.loans`, `staging.repayments` |
+| 2 | No loan in the last 12 months exceeded 90 days overdue | `staging.customers`, `staging.loans.days_overdue` |
 | 3 | Current limit held for ≥ 14 days | `customer_credit_limit.profiling_date` |
 | 4 | Not fraud-flagged (`Reject` or `Manual Review`) | `tbl_fraud_rules` |
 | 5 | Debt-to-income ratio < 50 % (not actively lender-dependent) | `tbl_subscriber_profiles.debt_to_income_ratio` |

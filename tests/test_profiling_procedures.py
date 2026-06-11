@@ -173,7 +173,9 @@ class TestProcedureSources:
         enhancement_sql = _read_procedure("sp_apply_credit_limit_enhancement.sql")
         assert "tbl_credit_limit_enhancements" in enhancement_sql
         assert f"{LMS_SCHEMA}.loans" in enhancement_sql
+        assert f"{LMS_SCHEMA}.repayments" in enhancement_sql
         assert f"{LMS_SCHEMA}.customers" in enhancement_sql
+        assert "deleted_at IS NULL" in enhancement_sql
         assert "enhancement_pct" in enhancement_sql
 
     def test_enhancement_calls_lem_rejection_procedure(self):
