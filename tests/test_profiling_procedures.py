@@ -166,6 +166,12 @@ class TestProcedureSources:
         assert "FRAUD_CRITICAL" in rejection_sql
         assert "tbl_fraud_rules" in rejection_sql
 
+    def test_credit_limit_enhancement_procedure_exists(self):
+        enhancement_sql = _read_procedure("sp_apply_credit_limit_enhancement.sql")
+        assert "tbl_credit_limit_enhancements" in enhancement_sql
+        assert "aleza.loans" in enhancement_sql
+        assert "enhancement_pct" in enhancement_sql
+
     def test_fly_profiling_model_category_uses_credit_limit(
         self, fly_profiling_sql
     ):

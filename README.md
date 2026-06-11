@@ -20,6 +20,7 @@ Parses Safaricom M-PESA PDF bank statements into structured CSV files and upload
 - [Credit scoring](#credit-scoring)
   - [Rejection reasons](#rejection-reasons)
   - [Fraud rules](#fraud-rules)
+  - [Credit limit enhancement](#credit-limit-enhancement)
 - [Development](#development)
 - [Deployment](#deployment)
   - [Server initial setup](#server-initial-setup)
@@ -83,11 +84,13 @@ Each transaction row extracted from the PDF is deduplicated against the database
 │   │   ├── 0016_create_tbl_rejection_reasons.sql
 │   │   ├── 0017_add_dti_cols_to_subscriber_profiles.sql
 │   │   ├── 0018_align_table_collations.sql
-│   │   └── 0019_create_fraud_rules.sql
+│   │   ├── 0019_create_fraud_rules.sql
+│   │   └── 0020_create_credit_limit_enhancements.sql
 │   └── procedures/
-│       ├── fly_profiling.sql                    # Credit-scoring stored procedure
-│       ├── sp_populate_fraud_rules.sql          # Fraud / gaming risk evaluation
-│       └── sp_populate_rejection_reasons.sql    # Rejection reason analysis procedure
+│       ├── fly_profiling.sql                         # Credit-scoring stored procedure
+│       ├── sp_populate_fraud_rules.sql               # Fraud / gaming risk evaluation
+│       ├── sp_populate_rejection_reasons.sql         # Rejection reason analysis procedure
+│       └── sp_apply_credit_limit_enhancement.sql     # Limit enhancement matrix (returning borrowers)
 ├── scripts/
 │   ├── pre-push                   # Git hook — runs lint + tests before push
 │   └── server-deploy.sh           # Server-side deploy script (called by CI/CD)
@@ -255,6 +258,7 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 | `tbl_rejection_reasons` | Ranked rejection reasons for `not_qualified` subscribers and `FRAUD_CRITICAL` hard rejections (see [Rejection reasons](#rejection-reasons)). |
 | `tbl_phone_id` | Device / identity registry — links `mobile_number`, `phone_id`, `device_id`, and `national_id` for fraud linkage rules. Populated externally. |
 | `tbl_fraud_rules` | Per-customer fraud evaluation — 12 rule flags, weighted score, decision tier, and JSON audit metrics (see [Fraud rules](#fraud-rules)). |
+| `tbl_credit_limit_enhancements` | Limit enhancement evaluation results for returning borrowers (see [Credit limit enhancement](#credit-limit-enhancement)). |
 | `schema_migrations` | Tracks which migration files have been applied and when. |
 
 ### Key columns — `customer_credit_limit`
@@ -471,6 +475,47 @@ Digital-lender disbursements use the same dictionary as the DTI calculation in `
 Table DDL is in migration `0019`. Procedure source: `db/procedures/sp_populate_fraud_rules.sql`.
 
 > **Note:** `tbl_phone_id` must be populated by an external identity/device capture system for the Device Multi-ID Linkage rule to fire. Fraud tiers `Reduce Limit` and `Manual Review` are recorded in `tbl_fraud_rules` but do not yet modify `credit_limit` in `fly_profiling` — only `Reject` (≥ 80) writes to `tbl_rejection_reasons`.
+
+### Credit limit enhancement
+
+`sp_apply_credit_limit_enhancement` evaluates returning borrowers against the **Credit Limit Enhancement Matrix** (current limit band × turnover segment) and writes results to `tbl_credit_limit_enhancements`. It joins parser tables in `Data_Science` with LMS loan tables in the `aleza` database on the same MySQL host (`customers`, `loans`, `loan_schedules`, `credit_profiles`).
+
+**Eligibility gates (all required):**
+
+| # | Condition | Source |
+|---|---|---|
+| 1 | Last closed loan repaid ≤ 3 days after final due date | `aleza.loans`, `aleza.loan_schedules` |
+| 2 | No loan in last 12 months exceeded 90 days overdue | `aleza.loan_schedules.days_overdue` |
+| 3 | Current limit held ≥ 14 days | `customer_credit_limit.profiling_date` |
+| 4 | Not fraud-flagged (`Reject` / `Manual Review`) | `tbl_fraud_rules` |
+| 5 | Debt-to-income ratio < 50 % | `tbl_subscriber_profiles` |
+
+**Enhancement matrix** (% increase by limit band × turnover segment 1–8):
+
+| Limit band | T8 | T7 | T6 | T5 | T4 | T3 | T2 | T1 |
+|---|---|---|---|---|---|---|---|---|
+| 30k–40k | 10 % | 5 % | | | | | | |
+| 20k–30k | 20 % | 10 % | 5 % | | | | | |
+| 10k–20k | 30 % | 20 % | 8 % | 10 % | | | | |
+| 5k–10k | 40 % | 30 % | 20 % | 15 % | 3 % | | | |
+| 1k–5k | 60 % | 50 % | 50 % | 40 % | 30 % | 20 % | 5 % | |
+
+Turnover segments use the same `three_month_wavg` thresholds as `fly_profiling`.
+
+```sql
+-- Evaluate only (no limit update)
+CALL sp_apply_credit_limit_enhancement('254722123456', 0);
+
+-- Evaluate all customers with a current limit >= 1 000
+CALL sp_apply_credit_limit_enhancement(NULL, 0);
+
+-- Evaluate and apply enhanced limits (updates aleza.credit_profiles + customer_credit_limit)
+CALL sp_apply_credit_limit_enhancement('254722123456', 1);
+```
+
+Table DDL: migration `0020`. Procedure: `db/procedures/sp_apply_credit_limit_enhancement.sql`.
+
+> **Note:** Change the `aleza.` schema prefix in the procedure if your LMS database name differs on the server.
 
 ---
 
