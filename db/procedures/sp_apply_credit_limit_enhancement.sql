@@ -2,7 +2,7 @@
 -- then Ctrl+Enter.  Do NOT include these comment lines.
 -- Easiest:  python -m db.deploy_procedures
 --
--- LMS tables are qualified as aleza.* (customers, loans, loan_schedules,
+-- LMS tables are qualified as staging.* (customers, loans, loan_schedules,
 -- credit_profiles). Change the prefix if your live-app database name differs.
 
 CREATE DEFINER=`production`@`%` PROCEDURE `Data_Science`.`sp_apply_credit_limit_enhancement`(
@@ -46,7 +46,7 @@ BEGIN
                 WHEN c.phone_number LIKE '+%'  THEN SUBSTRING(c.phone_number, 2)
                 ELSE TRIM(c.phone_number)
             END AS mobile_number
-        FROM aleza.customers c
+        FROM staging.customers c
         WHERE (c.soft_delete IS NULL OR c.soft_delete = 0)
           AND COALESCE(c.is_active, 1) = 1
           AND COALESCE(c.blacklisted, 0) = 0
@@ -107,7 +107,7 @@ BEGIN
                     PARTITION BY l.customer_id
                     ORDER BY     l.closed_date DESC, l.id DESC
                 ) AS rn
-            FROM aleza.loans l
+            FROM staging.loans l
             WHERE l.loan_status = 'closed'
               AND (l.soft_delete IS NULL OR l.soft_delete = 0)
         ) x
@@ -126,7 +126,7 @@ BEGIN
         FROM last_loan ll
         JOIN LATERAL (
             SELECT ls.due_date, ls.paid_date
-            FROM   aleza.loan_schedules ls
+            FROM   staging.loan_schedules ls
             WHERE  ls.loan_id = ll.loan_id
               AND  (ls.soft_delete IS NULL OR ls.soft_delete = 0)
             ORDER  BY ls.installment_number DESC
@@ -146,8 +146,8 @@ BEGIN
         SELECT
             l.customer_id,
             MAX(ls.days_overdue) AS max_arrears_days
-        FROM aleza.loans l
-        INNER JOIN aleza.loan_schedules ls ON ls.loan_id = l.id
+        FROM staging.loans l
+        INNER JOIN staging.loan_schedules ls ON ls.loan_id = l.id
         WHERE (l.soft_delete IS NULL OR l.soft_delete = 0)
           AND (ls.soft_delete IS NULL OR ls.soft_delete = 0)
           AND l.disbursement_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
@@ -314,7 +314,7 @@ BEGIN
     CALL sp_populate_LEM_rejection_reasons(p_mobile_number);
 
     IF p_apply = 1 THEN
-        UPDATE aleza.credit_profiles cp
+        UPDATE staging.credit_profiles cp
         INNER JOIN tbl_credit_limit_enhancements e
                 ON e.customer_id = cp.customer_id
         SET    cp.credit_limit     = e.enhanced_limit,
