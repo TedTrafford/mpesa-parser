@@ -48,7 +48,7 @@ PDF statement  →  Parser  →  CSV  →  MySQL (tbl_raw_mpesa_statements)
               (credit gates for not_qualified + FRAUD_CRITICAL for score ≥ 80)
 
 Returning borrowers (on demand / scheduled):
-  aleza.loans + loan_schedules + parser tables
+  staging.loans + loan_schedules + parser tables
            ↓
   sp_apply_credit_limit_enhancement(mobile, apply)
            ↓
@@ -58,7 +58,7 @@ Returning borrowers (on demand / scheduled):
            ↓
   tbl_LEM_rejection_reasons
            ↓
-  (optional, p_apply = 1) aleza.credit_profiles + customer_credit_limit
+  (optional, p_apply = 1) staging.credit_profiles + customer_credit_limit
 ```
 
 Each transaction row extracted from the PDF is deduplicated against the database using a composite key on `(receipt_no, amount)` — re-submitting the same PDF is safe.
@@ -332,7 +332,7 @@ Subscribers with `debt_to_income_ratio > 0.50` (50 %) are hard-gated to `not_qua
 
 | Column | Type | Notes |
 |---|---|---|
-| `customer_id` | `CHAR(36)` | LMS `aleza.customers.id` (UUID) |
+| `customer_id` | `CHAR(36)` | LMS `staging.customers.id` (UUID) |
 | `mobile_number` | `VARCHAR(20)` | International format (`254xxx`) |
 | `current_limit` | `INT` | Limit before enhancement (from `customer_credit_limit`) |
 | `turnover_segment` | `TINYINT` | 1–8, derived from `three_month_wavg` (same thresholds as `fly_profiling`) |
@@ -353,7 +353,7 @@ Subscribers with `debt_to_income_ratio > 0.50` (50 %) are hard-gated to `not_qua
 | Column | Type | Notes |
 |---|---|---|
 | `mobile_number` | `VARCHAR(20)` | Primary lookup key |
-| `customer_id` | `CHAR(36)` | LMS `aleza.customers.id` (UUID) |
+| `customer_id` | `CHAR(36)` | LMS `staging.customers.id` (UUID) |
 | `enhancement_id` | `BIGINT UNSIGNED` | FK to `tbl_credit_limit_enhancements.id` for this evaluation |
 | `reason_rank` | `TINYINT UNSIGNED` | `1` = most impactful gate failure; dense-ranked among active failures |
 | `reason_code` | `VARCHAR(60)` | Machine-readable LEM code (see [LEM rejection reasons](#lem-rejection-reasons)) |
@@ -546,7 +546,7 @@ Table DDL is in migration `0019`. Procedure source: `db/procedures/sp_populate_f
 
 ### Credit limit enhancement
 
-`sp_apply_credit_limit_enhancement(p_mobile_number, p_apply)` evaluates returning borrowers against the **Credit Limit Enhancement Matrix** (current limit band on the Y-axis × turnover segment on the X-axis). Results are written to `tbl_credit_limit_enhancements`. The procedure joins parser tables in `Data_Science` with LMS loan tables in the `aleza` database on the same MySQL host.
+`sp_apply_credit_limit_enhancement(p_mobile_number, p_apply)` evaluates returning borrowers against the **Credit Limit Enhancement Matrix** (current limit band on the Y-axis × turnover segment on the X-axis). Results are written to `tbl_credit_limit_enhancements`. The procedure joins parser tables in `Data_Science` with LMS loan tables in the `staging` database on the same MySQL host.
 
 **Signature:**
 
@@ -557,21 +557,21 @@ CALL sp_apply_credit_limit_enhancement(p_mobile_number, p_apply);
 | Parameter | Type | Description |
 |---|---|---|
 | `p_mobile_number` | `VARCHAR(20)` | Customer mobile (`254xxx`), or `NULL` for batch (all customers with `credit_limit >= 1000`) |
-| `p_apply` | `TINYINT(1)` | `0` or `NULL` = evaluate only; `1` = also update `aleza.credit_profiles` and `customer_credit_limit` (both parameters are required — MySQL does not support parameter defaults) |
+| `p_apply` | `TINYINT(1)` | `0` or `NULL` = evaluate only; `1` = also update `staging.credit_profiles` and `customer_credit_limit` (both parameters are required — MySQL does not support parameter defaults) |
 
 **Data sources:**
 
 | Domain | Tables | Database |
 |---|---|---|
 | Parser / analytics | `customer_credit_limit`, `tbl_subscriber_profiles`, `tbl_fraud_rules` | `Data_Science` |
-| Loan management | `customers`, `loans`, `loan_schedules`, `credit_profiles` | `aleza` |
+| Loan management | `customers`, `loans`, `loan_schedules`, `credit_profiles` | `staging` |
 
 **Eligibility gates (all required):**
 
 | # | Condition | Source |
 |---|---|---|
-| 1 | Last closed loan repaid ≤ 3 days after final installment due date | `aleza.loans`, `aleza.loan_schedules` |
-| 2 | No loan in the last 12 months had any installment > 90 days overdue | `aleza.loan_schedules.days_overdue` |
+| 1 | Last closed loan repaid ≤ 3 days after final installment due date | `staging.loans`, `staging.loan_schedules` |
+| 2 | No loan in the last 12 months had any installment > 90 days overdue | `staging.loan_schedules.days_overdue` |
 | 3 | Current limit held for ≥ 14 days | `customer_credit_limit.profiling_date` |
 | 4 | Not fraud-flagged (`Reject` or `Manual Review`) | `tbl_fraud_rules` |
 | 5 | Debt-to-income ratio < 50 % (not actively lender-dependent) | `tbl_subscriber_profiles.debt_to_income_ratio` |
@@ -653,12 +653,12 @@ ORDER  BY e.evaluated_at DESC, r.reason_rank;
 
 When `p_apply = 1` and the customer is eligible, the procedure updates:
 
-- `aleza.credit_profiles.credit_limit` and `available_credit`
+- `staging.credit_profiles.credit_limit` and `available_credit`
 - `customer_credit_limit.credit_limit` with `profiling_category = 'ENHANCED'`
 
 Table DDL: migration `0020`. Procedure: `db/procedures/sp_apply_credit_limit_enhancement.sql`.
 
-> **Note:** Change the `aleza.` schema prefix in the procedure if your LMS database name differs on the server (production host `65.20.86.247:3306`).
+> **Note:** LMS tables use the `staging.` schema prefix in `sp_apply_credit_limit_enhancement.sql`. Change it if your live-app database name differs on the server (production host `65.20.86.247:3306`).
 
 ### LEM rejection reasons
 

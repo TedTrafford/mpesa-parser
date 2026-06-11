@@ -2,7 +2,7 @@
 -- Migration 0020: Credit limit enhancement audit table
 --
 -- Evaluation logic lives in db/procedures/sp_apply_credit_limit_enhancement.sql
--- (deployed at startup). LMS loan tables are read from the `aleza` database on
+-- (deployed at startup). LMS loan tables are read from the `staging` database on
 -- the same MySQL host; adjust the prefix in the procedure if your LMS schema
 -- name differs.
 -- =============================================================================

@@ -23,6 +23,9 @@ from tests.profiling_rules import (
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCEDURES_DIR = os.path.join(PROJECT_ROOT, "db", "procedures")
 
+# LMS database schema prefix used in sp_apply_credit_limit_enhancement.sql
+LMS_SCHEMA = "staging"
+
 
 def _read_procedure(name: str) -> str:
     path = os.path.join(PROCEDURES_DIR, name)
@@ -169,7 +172,8 @@ class TestProcedureSources:
     def test_credit_limit_enhancement_procedure_exists(self):
         enhancement_sql = _read_procedure("sp_apply_credit_limit_enhancement.sql")
         assert "tbl_credit_limit_enhancements" in enhancement_sql
-        assert "aleza.loans" in enhancement_sql
+        assert f"{LMS_SCHEMA}.loans" in enhancement_sql
+        assert f"{LMS_SCHEMA}.customers" in enhancement_sql
         assert "enhancement_pct" in enhancement_sql
 
     def test_enhancement_calls_lem_rejection_procedure(self):
