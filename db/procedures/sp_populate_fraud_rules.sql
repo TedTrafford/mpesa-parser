@@ -72,11 +72,11 @@ BEGIN
 
             CASE
                 WHEN s.transaction_type IN ('SEND MONEY', 'RECEIVED MONEY')
-                     AND s.details REGEXP '-[[:space:]]*[0-9*]+[[:space:]]+.+'
+                     AND s.details REGEXP '-[ \\t]*[0-9*]+[ \\t]+.+'
                 THEN TRIM(
                     REGEXP_REPLACE(
-                        REGEXP_REPLACE(s.details, '[[:space:]]+', ' '),
-                        '^.*-[[:space:]]*[0-9*]+[[:space:]]+',
+                        REGEXP_REPLACE(s.details, '[ \\t]+', ' '),
+                        '^.*-[ \\t]*[0-9*]+[ \\t]+',
                         ''
                     )
                 )
@@ -103,7 +103,10 @@ BEGIN
                 OR s.details LIKE '%bangbet%'
                 OR s.details LIKE '%kwikbet%'
                 OR s.details LIKE '%winbet%'
-                OR (s.transaction_type LIKE '%PAYBILL%' AND s.details REGEXP '[[:<:]]bet[[:>:]]')
+                OR (
+                    s.transaction_type LIKE '%PAYBILL%'
+                    AND INSTR(CONCAT(' ', LOWER(s.details), ' '), ' bet ') > 0
+                )
             ) AS is_bet,
 
             (
@@ -284,14 +287,14 @@ BEGIN
             s.mobile_number,
             TRIM(
                 REGEXP_REPLACE(
-                    REGEXP_REPLACE(s.details, '[[:space:]]+', ' '),
-                    '^.*-[[:space:]]*[0-9*]+[[:space:]]+',
+                    REGEXP_REPLACE(s.details, '[ \\t]+', ' '),
+                    '^.*-[ \\t]*[0-9*]+[ \\t]+',
                     ''
                 )
             ) AS sender
         FROM tbl_raw_mpesa_statements s
         WHERE s.transaction_type = 'RECEIVED MONEY'
-          AND s.details REGEXP '-[[:space:]]*[0-9*]+[[:space:]]+.+'
+          AND s.details REGEXP '-[ \\t]*[0-9*]+[ \\t]+.+'
     ),
     sender_fanout AS (
         SELECT sender
