@@ -17,9 +17,26 @@ BEGIN
         END IF;
     END IF;
 
-    -- Refresh reasons for the evaluation scope (enhancement rows are re-inserted each run).
+    -- Refresh reasons for the evaluation scope (one row per run in enhancements).
     DELETE FROM tbl_LEM_rejection_reasons
     WHERE (p_mobile_number IS NULL OR mobile_number = p_mobile_number);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_latest_enhancement;
+    CREATE TEMPORARY TABLE tmp_latest_enhancement AS
+    SELECT e.id, e.customer_id, e.mobile_number, e.is_eligible,
+           e.fraud_decision, e.max_arrears_days_1y, e.last_loan_days_late,
+           e.debt_to_income_ratio, e.limit_age_days, e.current_limit,
+           e.limit_band, e.turnover_segment, e.enhancement_pct
+    FROM (
+        SELECT e2.*,
+               ROW_NUMBER() OVER (
+                   PARTITION BY e2.mobile_number
+                   ORDER BY     e2.evaluated_at DESC, e2.id DESC
+               ) AS rn
+        FROM tbl_credit_limit_enhancements e2
+        WHERE (p_mobile_number IS NULL OR e2.mobile_number = p_mobile_number)
+    ) e
+    WHERE e.rn = 1;
 
     -- -----------------------------------------------------------------------
     -- Shared candidate set: latest ineligible enhancement evaluation per customer
@@ -43,9 +60,8 @@ BEGIN
             e.customer_id,
             e.fraud_decision,
             CASE WHEN e.fraud_decision IN ('Reject', 'Manual Review') THEN 1 ELSE 0 END AS fail_fraud
-        FROM tbl_credit_limit_enhancements e
+        FROM tmp_latest_enhancement e
         WHERE e.is_eligible = 0
-          AND (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number)
     )
     SELECT
         c.mobile_number,
@@ -76,9 +92,8 @@ BEGIN
             e.fraud_decision,
             CASE WHEN e.fraud_decision IN ('Reject', 'Manual Review') THEN 1 ELSE 0 END AS fail_fraud,
             CASE WHEN COALESCE(e.max_arrears_days_1y, 0) > 90 THEN 1 ELSE 0 END       AS fail_arrears
-        FROM tbl_credit_limit_enhancements e
+        FROM tmp_latest_enhancement e
         WHERE e.is_eligible = 0
-          AND (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number)
     )
     SELECT
         c.mobile_number,
@@ -111,9 +126,8 @@ BEGIN
             CASE WHEN e.fraud_decision IN ('Reject', 'Manual Review') THEN 1 ELSE 0 END AS fail_fraud,
             CASE WHEN COALESCE(e.max_arrears_days_1y, 0) > 90 THEN 1 ELSE 0 END       AS fail_arrears,
             CASE WHEN e.last_loan_days_late IS NULL THEN 1 ELSE 0 END                 AS fail_no_loan
-        FROM tbl_credit_limit_enhancements e
+        FROM tmp_latest_enhancement e
         WHERE e.is_eligible = 0
-          AND (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number)
     )
     SELECT
         c.mobile_number,
@@ -142,9 +156,8 @@ BEGIN
             CASE WHEN e.fraud_decision IN ('Reject', 'Manual Review') THEN 1 ELSE 0 END AS fail_fraud,
             CASE WHEN COALESCE(e.max_arrears_days_1y, 0) > 90 THEN 1 ELSE 0 END       AS fail_arrears,
             CASE WHEN e.last_loan_days_late IS NOT NULL AND e.last_loan_days_late > 3 THEN 1 ELSE 0 END AS fail_late
-        FROM tbl_credit_limit_enhancements e
+        FROM tmp_latest_enhancement e
         WHERE e.is_eligible = 0
-          AND (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number)
     )
     SELECT
         c.mobile_number,
@@ -179,9 +192,8 @@ BEGIN
             CASE WHEN e.last_loan_days_late IS NULL
                   OR e.last_loan_days_late > 3 THEN 1 ELSE 0 END                      AS fail_repay,
             CASE WHEN e.debt_to_income_ratio >= 0.5000 THEN 1 ELSE 0 END            AS fail_dti
-        FROM tbl_credit_limit_enhancements e
+        FROM tmp_latest_enhancement e
         WHERE e.is_eligible = 0
-          AND (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number)
     )
     SELECT
         c.mobile_number,
@@ -219,9 +231,8 @@ BEGIN
                   OR e.last_loan_days_late > 3 THEN 1 ELSE 0 END                      AS fail_repay,
             CASE WHEN e.debt_to_income_ratio >= 0.5000 THEN 1 ELSE 0 END            AS fail_dti,
             CASE WHEN e.limit_age_days IS NULL OR e.limit_age_days < 14 THEN 1 ELSE 0 END AS fail_tenure
-        FROM tbl_credit_limit_enhancements e
+        FROM tmp_latest_enhancement e
         WHERE e.is_eligible = 0
-          AND (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number)
     )
     SELECT
         c.mobile_number,
@@ -264,9 +275,8 @@ BEGIN
             CASE WHEN e.debt_to_income_ratio >= 0.5000 THEN 1 ELSE 0 END            AS fail_dti,
             CASE WHEN e.limit_age_days IS NULL OR e.limit_age_days < 14 THEN 1 ELSE 0 END AS fail_tenure,
             CASE WHEN e.enhancement_pct IS NULL THEN 1 ELSE 0 END                      AS fail_matrix
-        FROM tbl_credit_limit_enhancements e
+        FROM tmp_latest_enhancement e
         WHERE e.is_eligible = 0
-          AND (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number)
     )
     SELECT
         c.mobile_number,

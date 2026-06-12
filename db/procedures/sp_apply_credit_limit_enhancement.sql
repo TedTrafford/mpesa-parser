@@ -2,9 +2,10 @@
 -- then Ctrl+Enter.  Do NOT include these comment lines.
 -- Easiest:  python -m db.deploy_procedures
 --
--- LMS tables are qualified as staging.* (customers, loans, repayments,
--- credit_profiles). Soft-delete uses deleted_at IS NULL. Change the prefix if
--- your live-app database name differs.
+-- LMS tables are qualified as staging.* (customers, loans, repayments).
+-- Soft-delete uses deleted_at IS NULL. Approved limits are written to
+-- customer_credit_limit only.
+-- tbl_credit_limit_enhancements keeps full run history; readers use latest row.
 
 CREATE DEFINER=`production`@`%` PROCEDURE `Data_Science`.`sp_apply_credit_limit_enhancement`(
     IN p_mobile_number VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
@@ -27,13 +28,10 @@ BEGIN
         END IF;
     END IF;
 
-    DELETE FROM tbl_credit_limit_enhancements
-    WHERE (p_mobile_number IS NULL OR mobile_number = p_mobile_number);
-
     INSERT INTO tbl_credit_limit_enhancements (
         customer_id, mobile_number, evaluated_at,
         current_limit, turnover_segment, three_month_wavg,
-        limit_band, enhancement_pct, enhanced_limit,
+        limit_band, enhancement_pct, enhanced_limit, profiling_category,
         is_eligible, eligibility_detail, applied,
         last_loan_days_late, max_arrears_days_1y, limit_age_days,
         fraud_decision, debt_to_income_ratio
@@ -170,6 +168,18 @@ BEGIN
         LEFT JOIN arrears_1y a ON a.customer_id = s.customer_id
     ),
 
+    prior_revision AS (
+        SELECT
+            e.mobile_number,
+            COALESCE(MAX(
+                CAST(REGEXP_REPLACE(e.profiling_category, '[^0-9]', '') AS UNSIGNED)
+            ), 0) AS last_revision
+        FROM tbl_credit_limit_enhancements e
+        WHERE e.applied = 1
+          AND e.profiling_category LIKE 'ENHANCED\_%'
+        GROUP BY e.mobile_number
+    ),
+
     evaluated AS (
         SELECT
             lim.customer_id,
@@ -227,6 +237,7 @@ BEGIN
     scored AS (
         SELECT
             e.*,
+            CONCAT('ENHANCED_', COALESCE(pr.last_revision, 0) + 1) AS profiling_category,
 
             CASE e.limit_band
                 WHEN '30k_40k' THEN CASE e.turnover_segment
@@ -257,6 +268,7 @@ BEGIN
             ) AS elig_gate5
 
         FROM evaluated e
+        LEFT JOIN prior_revision pr ON pr.mobile_number = e.mobile_number
     )
     SELECT
         customer_id,
@@ -272,6 +284,7 @@ BEGIN
             THEN ROUND(current_limit * (1 + enhancement_pct))
             ELSE NULL
         END,
+        profiling_category,
         (
             elig_gate1 AND elig_gate2 AND elig_gate3 AND elig_gate4 AND elig_gate5
             AND enhancement_pct IS NOT NULL
@@ -321,37 +334,53 @@ BEGIN
     CALL sp_populate_LEM_rejection_reasons(p_mobile_number);
 
     IF p_apply = 1 THEN
-        UPDATE staging.credit_profiles cp
+        DELETE ccl
+        FROM   customer_credit_limit ccl
         INNER JOIN tbl_credit_limit_enhancements e
-                ON e.customer_id = cp.customer_id
-        SET    cp.credit_limit     = e.enhanced_limit,
-               cp.available_credit = GREATEST(
-                   0,
-                   e.enhanced_limit - COALESCE(cp.outstanding_balance, 0)
-               ),
-               cp.updated_at       = NOW()
+                ON e.mobile_number = ccl.mobile_number
+        INNER JOIN (
+            SELECT mobile_number, MAX(id) AS latest_id
+            FROM   tbl_credit_limit_enhancements
+            WHERE  (p_mobile_number IS NULL OR mobile_number = p_mobile_number)
+            GROUP  BY mobile_number
+        ) latest ON latest.latest_id = e.id
         WHERE  e.is_eligible    = 1
           AND  e.enhanced_limit IS NOT NULL
           AND  e.enhanced_limit > e.current_limit
-          AND  (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number)
-          AND  cp.deleted_at IS NULL;
+          AND  (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number);
 
-        UPDATE customer_credit_limit ccl
-        INNER JOIN tbl_credit_limit_enhancements e
-                ON e.mobile_number = ccl.mobile_number
-        SET    ccl.credit_limit       = e.enhanced_limit,
-               ccl.profiling_date     = NOW(),
-               ccl.profiling_category = 'ENHANCED'
+        INSERT INTO customer_credit_limit (
+            mobile_number, credit_limit, profiling_date, profiling_category
+        )
+        SELECT
+            e.mobile_number,
+            e.enhanced_limit,
+            NOW(),
+            e.profiling_category
+        FROM tbl_credit_limit_enhancements e
+        INNER JOIN (
+            SELECT mobile_number, MAX(id) AS latest_id
+            FROM   tbl_credit_limit_enhancements
+            WHERE  (p_mobile_number IS NULL OR mobile_number = p_mobile_number)
+            GROUP  BY mobile_number
+        ) latest ON latest.latest_id = e.id
         WHERE  e.is_eligible    = 1
           AND  e.enhanced_limit IS NOT NULL
           AND  e.enhanced_limit > e.current_limit
           AND  (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number);
 
         UPDATE tbl_credit_limit_enhancements e
+        INNER JOIN (
+            SELECT mobile_number, MAX(id) AS latest_id
+            FROM   tbl_credit_limit_enhancements
+            WHERE  (p_mobile_number IS NULL OR mobile_number = p_mobile_number)
+            GROUP  BY mobile_number
+        ) latest ON latest.latest_id = e.id
         SET    e.applied    = 1,
                e.applied_at = NOW()
-        WHERE  e.is_eligible = 1
+        WHERE  e.is_eligible    = 1
           AND  e.enhanced_limit IS NOT NULL
+          AND  e.enhanced_limit > e.current_limit
           AND  (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number);
     END IF;
 

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS `tbl_credit_limit_enhancements` (
     `limit_band`            VARCHAR(20)      DEFAULT NULL,
     `enhancement_pct`       DECIMAL(5,2)     DEFAULT NULL,
     `enhanced_limit`        INT              DEFAULT NULL,
+    `profiling_category`    VARCHAR(20)      DEFAULT NULL,
 
     `is_eligible`           TINYINT(1)       NOT NULL DEFAULT 0,
     `eligibility_detail`    TEXT             NOT NULL,

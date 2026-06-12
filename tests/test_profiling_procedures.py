@@ -177,6 +177,12 @@ class TestProcedureSources:
         assert f"{LMS_SCHEMA}.customers" in enhancement_sql
         assert "deleted_at IS NULL" in enhancement_sql
         assert "enhancement_pct" in enhancement_sql
+        assert "profiling_category" in enhancement_sql
+        assert "ENHANCED_" in enhancement_sql
+        assert "staging.credit_profiles" not in enhancement_sql
+        assert "customer_credit_limit ccl" in enhancement_sql
+        assert "INSERT INTO customer_credit_limit" in enhancement_sql
+        assert "DELETE FROM tbl_credit_limit_enhancements" not in enhancement_sql
 
     def test_enhancement_calls_lem_rejection_procedure(self):
         enhancement_sql = _read_procedure("sp_apply_credit_limit_enhancement.sql")
@@ -195,6 +201,7 @@ class TestProcedureSources:
         ):
             assert code in lem_sql
         assert "tbl_LEM_rejection_reasons" in lem_sql
+        assert "tmp_latest_enhancement" in lem_sql
 
     def test_fly_profiling_model_category_uses_credit_limit(
         self, fly_profiling_sql
