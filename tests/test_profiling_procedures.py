@@ -165,6 +165,12 @@ class TestProcedureSources:
         fraud_sql = _read_procedure("sp_populate_fraud_rules.sql")
         assert "CALL sp_populate_rejection_reasons(p_mobile_number)" in fraud_sql
 
+    def test_fraud_rules_avoids_posix_regex(self):
+        fraud_sql = _read_procedure("sp_populate_fraud_rules.sql")
+        assert "[[:<:]]" not in fraud_sql
+        assert "[[:>:]]" not in fraud_sql
+        assert "[[:space:]]" not in fraud_sql
+
     def test_fraud_rules_applies_limit_adjustments(self):
         fraud_sql = _read_procedure("sp_populate_fraud_rules.sql")
         assert "UPDATE customer_credit_limit ccl" in fraud_sql
