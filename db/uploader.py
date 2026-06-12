@@ -19,12 +19,14 @@ import json
 import os
 import re
 import sys
+import time
 import traceback
 from collections import namedtuple
 from datetime import datetime, timezone
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.exc import OperationalError
 
 UploadResult = namedtuple("UploadResult", ["inserted", "skipped", "manifest_hash"])
 
@@ -122,6 +124,59 @@ _PROCEDURES_DIR = os.path.join(
     "db", "procedures",
 )
 
+# fly_profiling calls the other procedures; deploy it last so leaf bodies can
+# be refreshed without waiting on an in-flight CALL when possible.
+_PROCEDURES_DEPLOY_LAST = frozenset({"fly_profiling"})
+
+_LOCK_WAIT_TIMEOUT_SEC = 60
+_DROP_MAX_RETRIES = 10
+_DROP_RETRY_PAUSE_SEC = 15
+
+
+def _procedure_sql_files() -> list[str]:
+    """Return procedure .sql filenames; callers (fly_profiling) deploy last."""
+    files = [
+        f
+        for f in os.listdir(_PROCEDURES_DIR)
+        if f.endswith(".sql") and not f.endswith("_drop.sql")
+    ]
+    return sorted(
+        files,
+        key=lambda name: (
+            name.removesuffix(".sql") in _PROCEDURES_DEPLOY_LAST,
+            name,
+        ),
+    )
+
+
+def _drop_procedure_with_retry(conn, proc_name: str) -> None:
+    """DROP with bounded lock wait; retry while callers hold metadata locks."""
+    for attempt in range(1, _DROP_MAX_RETRIES + 1):
+        try:
+            conn.execute(
+                text(f"SET SESSION lock_wait_timeout = {_LOCK_WAIT_TIMEOUT_SEC}")
+            )
+            conn.execute(text(f"DROP PROCEDURE IF EXISTS `{proc_name}`"))
+            return
+        except OperationalError as exc:
+            err = str(exc).lower()
+            if "1205" not in err and "lock wait timeout" not in err:
+                raise
+            if attempt == _DROP_MAX_RETRIES:
+                raise RuntimeError(
+                    f"Could not DROP PROCEDURE `{proc_name}` after "
+                    f"{_DROP_MAX_RETRIES} attempts (~"
+                    f"{_DROP_MAX_RETRIES * _LOCK_WAIT_TIMEOUT_SEC}s). "
+                    "An active CALL is holding a metadata lock — check "
+                    "SHOW FULL PROCESSLIST; stop app workers or wait for "
+                    "long fly_profiling runs to finish, then redeploy."
+                ) from exc
+            print(
+                f"  DB: metadata lock on `{proc_name}` "
+                f"(attempt {attempt}/{_DROP_MAX_RETRIES}) — retrying..."
+            )
+            time.sleep(_DROP_RETRY_PAUSE_SEC)
+
 
 def _deploy_all_procedures(conn) -> None:
     """Read every .sql file in db/procedures/ and (re)create each stored procedure.
@@ -140,11 +195,7 @@ def _deploy_all_procedures(conn) -> None:
         print("  DB: procedures directory not found — skipping procedure deployment")
         return
 
-    sql_files = sorted(
-        f
-        for f in os.listdir(_PROCEDURES_DIR)
-        if f.endswith(".sql") and not f.endswith("_drop.sql")
-    )
+    sql_files = _procedure_sql_files()
     if not sql_files:
         print("  DB: no procedure files found in db/procedures/")
         return
@@ -207,7 +258,7 @@ def _deploy_all_procedures(conn) -> None:
             continue
         proc_name = m.group(1)
 
-        conn.execute(text(f"DROP PROCEDURE IF EXISTS `{proc_name}`"))
+        _drop_procedure_with_retry(conn, proc_name)
         conn.execute(text(proc_sql))
         print(f"  DB: procedure `{proc_name}` deployed")
 
