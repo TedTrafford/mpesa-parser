@@ -284,10 +284,18 @@ BEGIN
     ),
 
     -- Rule 5: Shared Counterparties (20)
-    -- Limit to 6 months (same window as txn); unbounded scans stall profiling.
-    all_recv AS (
+    -- Reuse p2p_counterparty from txn (single-subscriber window). Fanout is
+    -- checked only for those senders; LIKE pre-filter avoids a full-table REGEXP
+    -- pass that blocked procedure redeploy via metadata locks.
+    target_senders AS (
+        SELECT DISTINCT p2p_counterparty AS sender
+        FROM   txn
+        WHERE  is_p2p_recv
+          AND  p2p_counterparty IS NOT NULL
+          AND  p2p_counterparty <> ''
+    ),
+    sender_fanout AS (
         SELECT
-            s.mobile_number,
             TRIM(
                 REGEXP_REPLACE(
                     REGEXP_REPLACE(s.details, '[ \\t]+', ' '),
@@ -300,19 +308,23 @@ BEGIN
           AND s.transaction_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
           AND s.details LIKE '%-%'
           AND s.details REGEXP '-[ \\t]*[0-9*]+[ \\t]+.+'
-    ),
-    sender_fanout AS (
-        SELECT sender
-        FROM   all_recv
-        WHERE  sender IS NOT NULL AND sender <> ''
-        GROUP  BY sender
-        HAVING COUNT(DISTINCT mobile_number) > 5
+          AND EXISTS (
+              SELECT 1
+              FROM   target_senders ts
+              WHERE  ts.sender <> ''
+                AND  s.details LIKE CONCAT('%', ts.sender, '%')
+          )
+        GROUP BY sender
+        HAVING COUNT(DISTINCT s.mobile_number) > 5
     ),
     shared AS (
-        SELECT DISTINCT ar.mobile_number, 1 AS flag
-        FROM   all_recv ar
-        INNER JOIN sender_fanout sf ON sf.sender = ar.sender
-        INNER JOIN scope sc ON sc.mobile_number = ar.mobile_number
+        SELECT sc.mobile_number, 1 AS flag
+        FROM   scope sc
+        WHERE  EXISTS (
+            SELECT 1
+            FROM   target_senders ts
+            INNER JOIN sender_fanout sf ON sf.sender = ts.sender
+        )
     ),
 
     disb AS (
