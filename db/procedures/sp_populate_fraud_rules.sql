@@ -9,18 +9,22 @@ BEGIN
 
     SET collation_connection = 'utf8mb4_unicode_ci';
 
-    -- Normalise a single supplied mobile number (batch mode leaves NULL).
-    IF p_mobile_number IS NOT NULL THEN
-        IF p_mobile_number LIKE '0%' THEN
-            SET p_mobile_number = CONCAT('254', SUBSTRING(p_mobile_number, 2));
-        ELSEIF p_mobile_number LIKE '+%' THEN
-            SET p_mobile_number = SUBSTRING(p_mobile_number, 2);
-        END IF;
+    -- Runtime path (fly_profiling) always passes one mobile. NULL batch mode scans
+    -- the whole statements table and is not supported here.
+    IF p_mobile_number IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'sp_populate_fraud_rules requires p_mobile_number';
+    END IF;
+
+    IF p_mobile_number LIKE '0%' THEN
+        SET p_mobile_number = CONCAT('254', SUBSTRING(p_mobile_number, 2));
+    ELSEIF p_mobile_number LIKE '+%' THEN
+        SET p_mobile_number = SUBSTRING(p_mobile_number, 2);
     END IF;
 
     -- Refresh: drop prior evaluation rows for the scope being recomputed.
     DELETE FROM tbl_fraud_rules
-    WHERE (p_mobile_number IS NULL OR mobile_number = p_mobile_number);
+    WHERE mobile_number = p_mobile_number;
 
     INSERT INTO tbl_fraud_rules (
         mobile_number, evaluated_at, statement_span_days,
@@ -34,9 +38,7 @@ BEGIN
     )
     WITH
     scope AS (
-        SELECT DISTINCT mobile_number
-        FROM   tbl_raw_mpesa_statements
-        WHERE  (p_mobile_number IS NULL OR mobile_number = p_mobile_number)
+        SELECT p_mobile_number AS mobile_number
     ),
 
     ref AS (
@@ -45,7 +47,7 @@ BEGIN
             MAX(transaction_date) AS ref_date,
             MIN(transaction_date) AS min_date
         FROM   tbl_raw_mpesa_statements
-        WHERE  (p_mobile_number IS NULL OR mobile_number = p_mobile_number)
+        WHERE  mobile_number = p_mobile_number
         GROUP  BY mobile_number
     ),
 
@@ -282,6 +284,7 @@ BEGIN
     ),
 
     -- Rule 5: Shared Counterparties (20)
+    -- Limit to 6 months (same window as txn); unbounded scans stall profiling.
     all_recv AS (
         SELECT
             s.mobile_number,
@@ -294,6 +297,8 @@ BEGIN
             ) AS sender
         FROM tbl_raw_mpesa_statements s
         WHERE s.transaction_type = 'RECEIVED MONEY'
+          AND s.transaction_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+          AND s.details LIKE '%-%'
           AND s.details REGEXP '-[ \\t]*[0-9*]+[ \\t]+.+'
     ),
     sender_fanout AS (
