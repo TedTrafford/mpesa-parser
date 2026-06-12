@@ -165,6 +165,18 @@ class TestProcedureSources:
         fraud_sql = _read_procedure("sp_populate_fraud_rules.sql")
         assert "CALL sp_populate_rejection_reasons(p_mobile_number)" in fraud_sql
 
+    def test_fraud_rules_applies_limit_adjustments(self):
+        fraud_sql = _read_procedure("sp_populate_fraud_rules.sql")
+        assert "UPDATE customer_credit_limit ccl" in fraud_sql
+        assert "UPDATE tbl_subscriber_profiles sp" in fraud_sql
+        assert "_FRAUD_reject" in fraud_sql
+        assert "_FRAUD_manual_review" in fraud_sql
+        assert "_FRAUD_reduced" in fraud_sql
+        assert "fraud_reject" in fraud_sql
+        assert "Fraud_manual_review" in fraud_sql
+        assert "Fraud_reduced" in fraud_sql
+        assert "FLOOR(ccl.credit_limit / 2)" in fraud_sql
+
     def test_rejection_includes_fraud_critical(self, rejection_sql):
         assert "FRAUD_CRITICAL" in rejection_sql
         assert "tbl_fraud_rules" in rejection_sql

@@ -504,4 +504,76 @@ BEGIN
     -- Propagate hard rejections (decision = 'Reject') into tbl_rejection_reasons.
     CALL sp_populate_rejection_reasons(p_mobile_number);
 
+    -- -------------------------------------------------------------------------
+    -- Apply fraud-driven limit adjustments to rows written by fly_profiling.
+    --   score >= 60 (Manual Review / Reject) -> limit 0
+    --   score >= 40 (Reduce Limit)           -> limit halved when limit > 0
+    -- -------------------------------------------------------------------------
+    UPDATE customer_credit_limit ccl
+    INNER JOIN tbl_fraud_rules fr ON fr.mobile_number = ccl.mobile_number
+    SET
+        ccl.credit_limit = CASE
+            WHEN fr.total_score >= 60 THEN 0
+            WHEN fr.total_score >= 40 AND ccl.credit_limit > 0
+                THEN FLOOR(ccl.credit_limit / 2)
+            ELSE ccl.credit_limit
+        END,
+        ccl.profiling_date = NOW(),
+        ccl.profiling_category = CASE
+            WHEN fr.total_score >= 80 THEN CONCAT(
+                IF(ccl.profiling_category LIKE 'FTB2%', 'FTB2', 'FTB1'),
+                '_FRAUD_reject'
+            )
+            WHEN fr.total_score >= 60 THEN CONCAT(
+                IF(ccl.profiling_category LIKE 'FTB2%', 'FTB2', 'FTB1'),
+                '_FRAUD_manual_review'
+            )
+            WHEN fr.total_score >= 40 AND ccl.credit_limit > 0 THEN CONCAT(
+                IF(ccl.profiling_category LIKE 'FTB2%', 'FTB2', 'FTB1'),
+                '_FRAUD_reduced'
+            )
+            ELSE ccl.profiling_category
+        END
+    WHERE fr.total_score >= 40
+      AND (
+          fr.total_score >= 60
+          OR ccl.credit_limit > 0
+      )
+      AND (p_mobile_number IS NULL OR fr.mobile_number = p_mobile_number);
+
+    UPDATE tbl_subscriber_profiles sp
+    INNER JOIN (
+        SELECT sp2.id, sp2.mobile_number
+        FROM (
+            SELECT id, mobile_number,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY mobile_number
+                       ORDER BY     last_updated DESC, id DESC
+                   ) AS rn
+            FROM tbl_subscriber_profiles
+            WHERE (p_mobile_number IS NULL OR mobile_number = p_mobile_number)
+        ) sp2
+        WHERE sp2.rn = 1
+    ) latest ON latest.id = sp.id
+    INNER JOIN tbl_fraud_rules fr ON fr.mobile_number = sp.mobile_number
+    SET
+        sp.credit_limit = CASE
+            WHEN fr.total_score >= 60 THEN 0
+            WHEN fr.total_score >= 40 AND sp.credit_limit > 0
+                THEN FLOOR(sp.credit_limit / 2)
+            ELSE sp.credit_limit
+        END,
+        sp.model_category = CASE
+            WHEN fr.total_score >= 80 THEN 'fraud_reject'
+            WHEN fr.total_score >= 60 THEN 'Fraud_manual_review'
+            WHEN fr.total_score >= 40 AND sp.credit_limit > 0 THEN 'Fraud_reduced'
+            ELSE sp.model_category
+        END
+    WHERE fr.total_score >= 40
+      AND (
+          fr.total_score >= 60
+          OR sp.credit_limit > 0
+      )
+      AND (p_mobile_number IS NULL OR fr.mobile_number = p_mobile_number);
+
 END;

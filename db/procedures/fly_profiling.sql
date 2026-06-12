@@ -492,8 +492,9 @@ BEGIN
 
     END IF;
 
-    -- Evaluate fraud rules, then surface rejection reasons (credit gates and
-    -- FRAUD_CRITICAL for score >= 80).
+    -- Evaluate fraud rules, surface rejection reasons (FRAUD_CRITICAL >= 80),
+    -- then apply fraud limit adjustments (zero / halve) to customer_credit_limit
+    -- and tbl_subscriber_profiles.
     CALL sp_populate_fraud_rules(ip_mobile_number);
 
 END;

@@ -9,7 +9,10 @@
 --     0 - 39   Approve
 --    40 - 59   Reduce Limit
 --    60 - 79   Manual Review
---    80+       Reject  -> FRAUD_CRITICAL reason via sp_populate_rejection_reasons
+--    80+       Reject  -> FRAUD_CRITICAL reason; limit 0; fraud_reject
+--    60-79     Manual Review -> limit 0; Fraud_manual_review
+--    40-59     Reduce Limit  -> limit halved when > 0; Fraud_reduced
+-- Limit adjustments are applied in sp_populate_fraud_rules after fly_profiling.
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS `tbl_phone_id` (
