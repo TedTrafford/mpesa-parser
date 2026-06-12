@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS `customer_credit_limit` (
     `mobile_number`      VARCHAR(20)      NOT NULL DEFAULT '',
     `credit_limit`       INT              NOT NULL DEFAULT 0,
     `profiling_date`     DATETIME         NOT NULL,
-    `profiling_category` VARCHAR(20)      NOT NULL DEFAULT '',
+    `profiling_category` VARCHAR(50)      NOT NULL DEFAULT '',
     PRIMARY KEY (`id`),
     INDEX `idx_ccl_mobile_number` (`mobile_number`)
 ) ENGINE=InnoDB

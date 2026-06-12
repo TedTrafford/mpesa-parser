@@ -492,8 +492,9 @@ BEGIN
 
     END IF;
 
-    IF model_category = 'not_qualified' THEN
-        CALL sp_populate_rejection_reasons(ip_mobile_number);
-    END IF;
+    -- Evaluate fraud rules, surface rejection reasons (FRAUD_CRITICAL >= 80),
+    -- then apply fraud limit adjustments (zero / halve) to customer_credit_limit
+    -- and tbl_subscriber_profiles.
+    CALL sp_populate_fraud_rules(ip_mobile_number);
 
 END;

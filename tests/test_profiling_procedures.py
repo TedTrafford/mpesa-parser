@@ -23,6 +23,9 @@ from tests.profiling_rules import (
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCEDURES_DIR = os.path.join(PROJECT_ROOT, "db", "procedures")
 
+# LMS database schema prefix used in sp_apply_credit_limit_enhancement.sql
+LMS_SCHEMA = "staging"
+
 
 def _read_procedure(name: str) -> str:
     path = os.path.join(PROCEDURES_DIR, name)
@@ -155,8 +158,62 @@ class TestProcedureSources:
     def rejection_sql(self):
         return _read_procedure("sp_populate_rejection_reasons.sql")
 
-    def test_fly_profiling_calls_rejection_procedure(self, fly_profiling_sql):
-        assert "CALL sp_populate_rejection_reasons(ip_mobile_number)" in fly_profiling_sql
+    def test_fly_profiling_calls_fraud_rules_procedure(self, fly_profiling_sql):
+        assert "CALL sp_populate_fraud_rules(ip_mobile_number)" in fly_profiling_sql
+
+    def test_fraud_rules_calls_rejection_procedure(self):
+        fraud_sql = _read_procedure("sp_populate_fraud_rules.sql")
+        assert "CALL sp_populate_rejection_reasons(p_mobile_number)" in fraud_sql
+
+    def test_fraud_rules_applies_limit_adjustments(self):
+        fraud_sql = _read_procedure("sp_populate_fraud_rules.sql")
+        assert "UPDATE customer_credit_limit ccl" in fraud_sql
+        assert "UPDATE tbl_subscriber_profiles sp" in fraud_sql
+        assert "_FRAUD_reject" in fraud_sql
+        assert "_FRAUD_manual_review" in fraud_sql
+        assert "_FRAUD_reduced" in fraud_sql
+        assert "fraud_reject" in fraud_sql
+        assert "Fraud_manual_review" in fraud_sql
+        assert "Fraud_reduced" in fraud_sql
+        assert "FLOOR(ccl.credit_limit / 2)" in fraud_sql
+
+    def test_rejection_includes_fraud_critical(self, rejection_sql):
+        assert "FRAUD_CRITICAL" in rejection_sql
+        assert "tbl_fraud_rules" in rejection_sql
+
+    def test_credit_limit_enhancement_procedure_exists(self):
+        enhancement_sql = _read_procedure("sp_apply_credit_limit_enhancement.sql")
+        assert "tbl_credit_limit_enhancements" in enhancement_sql
+        assert f"{LMS_SCHEMA}.loans" in enhancement_sql
+        assert f"{LMS_SCHEMA}.repayments" in enhancement_sql
+        assert f"{LMS_SCHEMA}.customers" in enhancement_sql
+        assert "deleted_at IS NULL" in enhancement_sql
+        assert "enhancement_pct" in enhancement_sql
+        assert "profiling_category" in enhancement_sql
+        assert "ENHANCED_" in enhancement_sql
+        assert "staging.credit_profiles" not in enhancement_sql
+        assert "customer_credit_limit ccl" in enhancement_sql
+        assert "INSERT INTO customer_credit_limit" in enhancement_sql
+        assert "DELETE FROM tbl_credit_limit_enhancements" not in enhancement_sql
+
+    def test_enhancement_calls_lem_rejection_procedure(self):
+        enhancement_sql = _read_procedure("sp_apply_credit_limit_enhancement.sql")
+        assert "CALL sp_populate_LEM_rejection_reasons(p_mobile_number)" in enhancement_sql
+
+    def test_lem_rejection_reason_codes(self):
+        lem_sql = _read_procedure("sp_populate_LEM_rejection_reasons.sql")
+        for code in (
+            "LEM_FRAUD_FLAG",
+            "LEM_EXCESSIVE_ARREARS",
+            "LEM_NO_CLOSED_LOAN",
+            "LEM_LATE_LOAN_REPAYMENT",
+            "LEM_HIGH_DEBT_TO_INCOME",
+            "LEM_LIMIT_TENURE_INSUFFICIENT",
+            "LEM_NO_MATRIX_CELL",
+        ):
+            assert code in lem_sql
+        assert "tbl_LEM_rejection_reasons" in lem_sql
+        assert "tmp_latest_enhancement" in lem_sql
 
     def test_fly_profiling_model_category_uses_credit_limit(
         self, fly_profiling_sql
