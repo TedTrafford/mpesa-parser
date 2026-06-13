@@ -2,7 +2,7 @@
 -- then Ctrl+Enter.  Do NOT include these comment lines.
 -- Easiest:  python -m db.deploy_procedures
 --
--- LMS tables are qualified as staging.* (customers, loans, repayments).
+-- LMS tables are qualified as production.* (customers, loans, repayments).
 -- Soft-delete uses deleted_at IS NULL. Approved limits are written to
 -- customer_credit_limit only.
 -- tbl_credit_limit_enhancements keeps full run history; readers use latest row.
@@ -45,7 +45,7 @@ BEGIN
                 WHEN c.phone_number LIKE '+%'  THEN SUBSTRING(c.phone_number, 2)
                 ELSE TRIM(c.phone_number)
             END AS mobile_number
-        FROM staging.customers c
+        FROM production.customers c
         WHERE c.deleted_at IS NULL
           AND COALESCE(c.is_active, 1) = 1
           AND COALESCE(c.blacklisted, 0) = 0
@@ -107,8 +107,8 @@ BEGIN
                     PARTITION BY c.id
                     ORDER BY     l.closed_date DESC, l.id DESC
                 ) AS rn
-            FROM staging.customers c
-            INNER JOIN staging.loans l ON l.customer_id = c.id
+            FROM production.customers c
+            INNER JOIN production.loans l ON l.customer_id = c.id
             WHERE c.deleted_at IS NULL
               AND l.deleted_at IS NULL
               AND l.loan_status = 'closed'
@@ -120,7 +120,7 @@ BEGIN
         SELECT
             r.loan_id,
             MAX(r.payment_date) AS final_paid_date
-        FROM staging.repayments r
+        FROM production.repayments r
         WHERE r.deleted_at IS NULL
           AND r.payment_status = 'posted'
         GROUP BY r.loan_id
@@ -151,8 +151,8 @@ BEGIN
         SELECT
             c.id AS customer_id,
             MAX(l.days_overdue) AS max_arrears_days
-        FROM staging.customers c
-        INNER JOIN staging.loans l ON l.customer_id = c.id
+        FROM production.customers c
+        INNER JOIN production.loans l ON l.customer_id = c.id
         WHERE c.deleted_at IS NULL
           AND l.deleted_at IS NULL
           AND l.disbursement_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)

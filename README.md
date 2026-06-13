@@ -42,13 +42,13 @@ PDF statement  →  Parser  →  CSV  →  MySQL (tbl_raw_mpesa_statements)
                                     tbl_fraud_rules
                          (12-rule score, decision, triggered rules)
                                            ↓
-                             sp_populate_rejection_reasons()
+                    limit adjustments + sp_populate_rejection_reasons()
                                            ↓
                                   tbl_rejection_reasons
               (credit gates for not_qualified + FRAUD_CRITICAL for score ≥ 80)
 
 Returning borrowers (on demand / scheduled):
-  staging.loans + loan_schedules + parser tables
+  production.loans + loan_schedules + parser tables
            ↓
   sp_apply_credit_limit_enhancement(mobile, apply)
            ↓
@@ -58,7 +58,7 @@ Returning borrowers (on demand / scheduled):
            ↓
   tbl_LEM_rejection_reasons
            ↓
-  (optional, p_apply = 1) staging.credit_profiles + customer_credit_limit
+  (optional, p_apply = 1) customer_credit_limit  (ENHANCED_1, ENHANCED_2, …)
 ```
 
 Each transaction row extracted from the PDF is deduplicated against the database using a composite key on `(receipt_no, amount)` — re-submitting the same PDF is safe.
@@ -100,7 +100,9 @@ Each transaction row extracted from the PDF is deduplicated against the database
 │   │   ├── 0018_align_table_collations.sql
 │   │   ├── 0019_create_fraud_rules.sql
 │   │   ├── 0020_create_credit_limit_enhancements.sql
-│   │   └── 0021_create_tbl_LEM_rejection_reasons.sql
+│   │   ├── 0021_create_tbl_LEM_rejection_reasons.sql
+│   │   ├── 0022_add_profiling_category_to_credit_limit_enhancements.sql
+│   │   └── 0023_widen_ccl_profiling_category.sql
 │   └── procedures/
 │       ├── fly_profiling.sql                         # Credit-scoring stored procedure
 │       ├── sp_populate_fraud_rules.sql               # Fraud / gaming risk evaluation
@@ -285,7 +287,7 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 | `mobile_number` | `VARCHAR(20)` | International format (`254xxx`) — consistent with all other tables |
 | `credit_limit` | `INT` | Whole-number amounts (0, 5000, 8000, …) |
 | `profiling_date` | `DATETIME` | When `fly_profiling()` last ran for this customer |
-| `profiling_category` | `VARCHAR(20)` | `FTB1` (new), `FTB2` (returning), or `ENHANCED` (after limit increase applied) |
+| `profiling_category` | `VARCHAR(50)` | `FTB1` / `FTB2` (initial), `ENHANCED_N` (after limit increase), or fraud-adjusted labels such as `FTB1_FRAUD_reject`, `FTB1_FRAUD_manual_review`, `FTB1_FRAUD_reduced` |
 
 > **Note:** Early deployments stored `mobile_number` and `credit_limit` as `DECIMAL(18,4)`, causing values to display with thousands-separator commas (e.g. `254,722,123,456.0000`). Migrations `0014` and `0015` correct this automatically — `0015` also strips any `.0000` decimal artefacts left in existing rows after the column type change.
 
@@ -332,13 +334,14 @@ Subscribers with `debt_to_income_ratio > 0.50` (50 %) are hard-gated to `not_qua
 
 | Column | Type | Notes |
 |---|---|---|
-| `customer_id` | `CHAR(36)` | LMS `staging.customers.id` (UUID) |
+| `customer_id` | `CHAR(36)` | LMS `production.customers.id` (UUID) |
 | `mobile_number` | `VARCHAR(20)` | International format (`254xxx`) |
 | `current_limit` | `INT` | Limit before enhancement (from `customer_credit_limit`) |
 | `turnover_segment` | `TINYINT` | 1–8, derived from `three_month_wavg` (same thresholds as `fly_profiling`) |
 | `limit_band` | `VARCHAR(20)` | `1k_5k`, `5k_10k`, `10k_20k`, `20k_30k`, or `30k_40k` |
 | `enhancement_pct` | `DECIMAL(5,2)` | Matrix percentage (e.g. `40.00` = 40 %) |
 | `enhanced_limit` | `INT` | `ROUND(current_limit × (1 + enhancement_pct / 100))` |
+| `profiling_category` | `VARCHAR(20)` | Revisioned label when applied — `ENHANCED_1`, `ENHANCED_2`, … (incremented from prior applied rows) |
 | `is_eligible` | `TINYINT(1)` | `1` only when all five eligibility gates pass and a matrix cell exists |
 | `eligibility_detail` | `TEXT` | Semicolon-separated reasons when ineligible |
 | `applied` | `TINYINT(1)` | `1` when `p_apply = 1` and the enhanced limit was written |
@@ -353,7 +356,7 @@ Subscribers with `debt_to_income_ratio > 0.50` (50 %) are hard-gated to `not_qua
 | Column | Type | Notes |
 |---|---|---|
 | `mobile_number` | `VARCHAR(20)` | Primary lookup key |
-| `customer_id` | `CHAR(36)` | LMS `staging.customers.id` (UUID) |
+| `customer_id` | `CHAR(36)` | LMS `production.customers.id` (UUID) |
 | `enhancement_id` | `BIGINT UNSIGNED` | FK to `tbl_credit_limit_enhancements.id` for this evaluation |
 | `reason_rank` | `TINYINT UNSIGNED` | `1` = most impactful gate failure; dense-ranked among active failures |
 | `reason_code` | `VARCHAR(60)` | Machine-readable LEM code (see [LEM rejection reasons](#lem-rejection-reasons)) |
@@ -415,7 +418,7 @@ After each successful parse, `fly_profiling(<mobile_number>)` is called automati
 5. Sets `model_category = 'qualified'` **only when `credit_limit > 0`**, so qualification always matches an actual limit assignment.
 6. Hard-gates subscribers to `not_qualified` when `debt_to_income_ratio > 50 %`.
 7. Writes results to `tbl_scoring_features`, `tbl_subscriber_profiles`, and `customer_credit_limit`.
-8. Calls `sp_populate_fraud_rules(<mobile_number>)`, which evaluates all 12 fraud rules, writes `tbl_fraud_rules`, then calls `sp_populate_rejection_reasons` for credit gates and `FRAUD_CRITICAL` rejections.
+8. Calls `sp_populate_fraud_rules(<mobile_number>)`, which evaluates all 12 fraud rules, writes `tbl_fraud_rules`, calls `sp_populate_rejection_reasons` for credit gates and `FRAUD_CRITICAL` rejections, and adjusts limits in `customer_credit_limit` / `tbl_subscriber_profiles` for Manual Review and Reduce Limit tiers.
 
 Stored procedures in `db/procedures/` are (re)deployed on every startup via `python -m db.deploy_procedures` (also run automatically by `ensure_table_exists()`). Edit a `.sql` file and redeploy to pick up changes.
 
@@ -490,17 +493,20 @@ The procedure source lives at `db/procedures/sp_populate_rejection_reasons.sql`.
 
 ### Fraud rules
 
-`sp_populate_fraud_rules(<mobile_number>)` evaluates 12 weighted fraud rules against `tbl_raw_mpesa_statements` (6-month window anchored on each customer's latest transaction date) and writes one row per customer to `tbl_fraud_rules`. Pass `NULL` to re-evaluate all customers in batch mode.
+`sp_populate_fraud_rules(<mobile_number>)` evaluates 12 weighted fraud rules against `tbl_raw_mpesa_statements` (6-month window anchored on each customer's latest transaction date) and writes one row per customer to `tbl_fraud_rules`. A mobile number is **required** — `NULL` batch mode is not supported.
 
 ```sql
 -- Single subscriber (called automatically by fly_profiling)
 CALL sp_populate_fraud_rules('254722123456');
-
--- Batch re-evaluation for all customers
-CALL sp_populate_fraud_rules(NULL);
 ```
 
-At the end of each run the procedure calls `sp_populate_rejection_reasons`, which inserts `FRAUD_CRITICAL` for any customer whose fraud decision is `Reject`.
+At the end of each run the procedure calls `sp_populate_rejection_reasons`, which inserts `FRAUD_CRITICAL` for any customer whose fraud decision is `Reject`. It then applies limit adjustments to `customer_credit_limit` and `tbl_subscriber_profiles`:
+
+| Fraud score | Limit adjustment | `profiling_category` / `model_category` |
+|---|---|---|
+| ≥ 80 (Reject) | Unchanged by fraud step (already rejected) | `FTB1_FRAUD_reject` / `fraud_reject` |
+| 60 – 79 (Manual Review) | Limit set to `0` | `FTB1_FRAUD_manual_review` / `Fraud_manual_review` |
+| 40 – 59 (Reduce Limit) | Limit halved when `> 0` | `FTB1_FRAUD_reduced` / `Fraud_reduced` |
 
 **Decision thresholds** (sum of triggered rule weights):
 
@@ -518,17 +524,17 @@ At the end of each run the procedure calls `sp_populate_rejection_reasons`, whic
 | Identity & Device | Device Multi-ID Linkage — device linked to > 3 unique National IDs in 90 days (`tbl_phone_id`) | 40 |
 | Identity & Device | SIM/Phone Recency — statement span (`MAX` − `MIN` transaction date) < 90 days | 25 |
 | Statement & Velocity | Network Concentration — bidirectional P2P with same entity > 5×/month and net amount diff < 10 % | 30 |
-| Statement & Velocity | Circular Cash Movement — monthly received ≈ monthly sent (≤ 5 % variance) | 20 |
-| Statement & Velocity | Shared Counterparties — P2P sender funding > 5 distinct borrowers | 20 |
+| Statement & Velocity | Circular Cash Movement — monthly received ≈ monthly sent (≤ 3 % variance) | 10 |
+| Statement & Velocity | Shared Counterparties — P2P received from > 2 distinct customers with fraud score > 80 in `tbl_fraud_rules` | 20 |
 | Statement & Velocity | Sudden Income Inflation — 1-month inflow / (6-month inflow ÷ 6) > 3 | 15 |
 | Credit Distress | Borrowing for Betting — loan disbursement followed by betting within 48 hours | 20 |
-| Credit Distress | Loan Cycling — > 3 rapid disburse → repay → re-borrow cycles | 15 |
+| Credit Distress | Loan Cycling — > 3 rapid disburse → repay → re-borrow cycles (Fuliza excluded) | 15 |
 | Credit Distress | High Gambling Exposure — betting outflows / total outflows > 30 % (1 month) | 15 |
-| Credit Distress | Active Loan Stacking — > 3 unrealised loan disbursements (6 months) | 15 |
+| Credit Distress | Active Loan Stacking — > 3 unrealised loan disbursements in 6 months (Fuliza excluded) | 15 |
 | Credit Distress | Excessive Borrowing Dependency — loan disbursements / total inflows > 50 % (6 months) | 10 |
 | Credit Distress | High Volume, Low Balance — average 1-month balance < 5 % of monthly inflows | 10 |
 
-Digital-lender disbursements use the same dictionary as the DTI calculation in `fly_profiling` (Fuliza, Tala, Branch, OKash, Hustler Fund, etc.).
+Digital-lender disbursements use the same dictionary as the DTI calculation in `fly_profiling` (Tala, Branch, OKash, Hustler Fund, etc.). **Fuliza / M-Pesa Overdraw** transactions are excluded from Loan Cycling and Active Loan Stacking. The Shared Counterparties rule matches sender phones against known high-score fraudsters already present in `tbl_fraud_rules` from prior evaluations.
 
 **Key columns — `tbl_fraud_rules`:**
 
@@ -540,13 +546,13 @@ Digital-lender disbursements use the same dictionary as the DTI calculation in `
 | `triggered_rules` | Pipe-separated list of triggered rule names and weights |
 | `metrics` | JSON audit payload (inflow ratios, cycle counts, device ID count, etc.) |
 
-Table DDL is in migration `0019`. Procedure source: `db/procedures/sp_populate_fraud_rules.sql`.
+Table DDL is in migration `0019` (widened `profiling_category` on `customer_credit_limit` in migration `0023`). Procedure source: `db/procedures/sp_populate_fraud_rules.sql`.
 
-> **Note:** `tbl_phone_id` must be populated by an external identity/device capture system for the Device Multi-ID Linkage rule to fire. Fraud tiers `Reduce Limit` and `Manual Review` are recorded in `tbl_fraud_rules` but do not yet modify `credit_limit` in `fly_profiling` — only `Reject` (≥ 80) writes to `tbl_rejection_reasons`.
+> **Note:** `tbl_phone_id` must be populated by an external identity/device capture system for the Device Multi-ID Linkage rule to fire. The Shared Counterparties rule only matches against fraudsters already scored in `tbl_fraud_rules` from earlier runs.
 
 ### Credit limit enhancement
 
-`sp_apply_credit_limit_enhancement(p_mobile_number, p_apply)` evaluates returning borrowers against the **Credit Limit Enhancement Matrix** (current limit band on the Y-axis × turnover segment on the X-axis). Results are written to `tbl_credit_limit_enhancements`. The procedure joins parser tables in `Data_Science` with LMS loan tables in the `staging` database on the same MySQL host.
+`sp_apply_credit_limit_enhancement(p_mobile_number, p_apply)` evaluates returning borrowers against the **Credit Limit Enhancement Matrix** (current limit band on the Y-axis × turnover segment on the X-axis). Results are written to `tbl_credit_limit_enhancements`. The procedure joins parser tables in `Data_Science` with LMS loan tables in the `production` database on the same MySQL host.
 
 **Signature:**
 
@@ -557,21 +563,21 @@ CALL sp_apply_credit_limit_enhancement(p_mobile_number, p_apply);
 | Parameter | Type | Description |
 |---|---|---|
 | `p_mobile_number` | `VARCHAR(20)` | Customer mobile (`254xxx`), or `NULL` for batch (all customers with `credit_limit >= 1000`) |
-| `p_apply` | `TINYINT(1)` | `0` or `NULL` = evaluate only; `1` = also update `staging.credit_profiles` and `customer_credit_limit` (both parameters are required — MySQL does not support parameter defaults) |
+| `p_apply` | `TINYINT(1)` | `0` or `NULL` = evaluate only; `1` = also write the enhanced limit to `customer_credit_limit` (both parameters are required — MySQL does not support parameter defaults) |
 
 **Data sources:**
 
 | Domain | Tables | Database |
 |---|---|---|
 | Parser / analytics | `customer_credit_limit`, `tbl_subscriber_profiles`, `tbl_fraud_rules` | `Data_Science` |
-| Loan management | `customers`, `loans`, `repayments`, `credit_profiles` | `staging` |
+| Loan management | `customers`, `loans`, `repayments` | `production` |
 
 **Eligibility gates (all required):**
 
 | # | Condition | Source |
 |---|---|---|
-| 1 | Last closed loan repaid ≤ 3 days after maturity date | `staging.customers`, `staging.loans`, `staging.repayments` |
-| 2 | No loan in the last 12 months exceeded 90 days overdue | `staging.customers`, `staging.loans.days_overdue` |
+| 1 | Last closed loan repaid ≤ 3 days after maturity date | `production.customers`, `production.loans`, `production.repayments` |
+| 2 | No loan in the last 12 months exceeded 90 days overdue | `production.customers`, `production.loans.days_overdue` |
 | 3 | Current limit held for ≥ 14 days | `customer_credit_limit.profiling_date` |
 | 4 | Not fraud-flagged (`Reject` or `Manual Review`) | `tbl_fraud_rules` |
 | 5 | Debt-to-income ratio < 50 % (not actively lender-dependent) | `tbl_subscriber_profiles.debt_to_income_ratio` |
@@ -651,14 +657,13 @@ WHERE  e.is_eligible = 0
 ORDER  BY e.evaluated_at DESC, r.reason_rank;
 ```
 
-When `p_apply = 1` and the customer is eligible, the procedure updates:
+When `p_apply = 1` and the customer is eligible, the procedure:
 
-- `staging.credit_profiles.credit_limit` and `available_credit`
-- `customer_credit_limit.credit_limit` with `profiling_category = 'ENHANCED'`
+- Deletes the prior `customer_credit_limit` row for that mobile number
+- Inserts a new row with `credit_limit = enhanced_limit` and `profiling_category = ENHANCED_N` (revision increments from the last applied enhancement)
+- Marks the evaluation row as `applied = 1`
 
-Table DDL: migration `0020`. Procedure: `db/procedures/sp_apply_credit_limit_enhancement.sql`.
-
-> **Note:** LMS tables use the `staging.` schema prefix in `sp_apply_credit_limit_enhancement.sql`. Change it if your live-app database name differs on the server (production host `65.20.86.247:3306`).
+Table DDL: migrations `0020` and `0022`. Procedure: `db/procedures/sp_apply_credit_limit_enhancement.sql`.
 
 ### LEM rejection reasons
 

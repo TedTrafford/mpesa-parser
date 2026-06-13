@@ -24,7 +24,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCEDURES_DIR = os.path.join(PROJECT_ROOT, "db", "procedures")
 
 # LMS database schema prefix used in sp_apply_credit_limit_enhancement.sql
-LMS_SCHEMA = "staging"
+LMS_SCHEMA = "production"
 
 
 def _read_procedure(name: str) -> str:
@@ -175,8 +175,10 @@ class TestProcedureSources:
         fraud_sql = _read_procedure("sp_populate_fraud_rules.sql")
         assert "requires p_mobile_number" in fraud_sql
         assert "INTERVAL 6 MONTH" in fraud_sql
-        assert "target_senders AS" in fraud_sql
-        assert "sender_fanout AS" in fraud_sql
+        assert "tbl_fraud_rules fr" in fraud_sql
+        assert "fr.total_score > 80" in fraud_sql
+        assert "target_senders AS" not in fraud_sql
+        assert "sender_fanout AS" not in fraud_sql
         assert "all_recv AS" not in fraud_sql
 
     def test_fraud_rules_applies_limit_adjustments(self):
