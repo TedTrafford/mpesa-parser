@@ -24,7 +24,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCEDURES_DIR = os.path.join(PROJECT_ROOT, "db", "procedures")
 
 # LMS database schema prefix used in sp_apply_credit_limit_enhancement.sql
-LMS_SCHEMA = "staging"
+LMS_SCHEMA = "production"
 
 
 def _read_procedure(name: str) -> str:
