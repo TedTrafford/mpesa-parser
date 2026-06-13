@@ -223,8 +223,8 @@ def _update_job_file(job_file: str, **fields) -> dict:
 def call_fly_profiling(mobile_number: str) -> str:
     """Execute CALL fly_profiling('<mobile_number>') against the configured DB.
 
-    The procedure is deployed automatically at startup via the migration in
-    db/uploader.ensure_table_exists().
+    The procedure must be deployed via ``python -m db.deploy_procedures``
+    (see scripts/server-deploy.sh); it is not redeployed on every parse job.
 
     Returns a short status string that callers can record in logs:
         "OK"              — procedure completed successfully

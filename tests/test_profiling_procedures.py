@@ -175,8 +175,10 @@ class TestProcedureSources:
         fraud_sql = _read_procedure("sp_populate_fraud_rules.sql")
         assert "requires p_mobile_number" in fraud_sql
         assert "INTERVAL 6 MONTH" in fraud_sql
-        assert "target_senders AS" in fraud_sql
-        assert "sender_fanout AS" in fraud_sql
+        assert "tbl_fraud_rules fr" in fraud_sql
+        assert "fr.total_score > 80" in fraud_sql
+        assert "target_senders AS" not in fraud_sql
+        assert "sender_fanout AS" not in fraud_sql
         assert "all_recv AS" not in fraud_sql
 
     def test_fraud_rules_applies_limit_adjustments(self):

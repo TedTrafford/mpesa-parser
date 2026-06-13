@@ -192,7 +192,14 @@ BEGIN
                         )
                     )
                 )
-            ) AS is_loan_repay
+            ) AS is_loan_repay,
+
+            (
+                s.details LIKE '%Fuliza%'
+                OR s.details LIKE '%M-PESA Overdraw%'
+                OR s.details LIKE '%OD Loan%'
+                OR s.details LIKE '%overdraft of credit party%'
+            ) AS is_fuliza
         FROM   tbl_raw_mpesa_statements s
         INNER JOIN ref r ON r.mobile_number = s.mobile_number
         WHERE  s.transaction_date >= DATE_SUB(r.ref_date, INTERVAL 6 MONTH)
@@ -258,7 +265,7 @@ BEGIN
         GROUP BY mobile_number
     ),
 
-    -- Rule 4: Circular Cash Movement (20)
+    -- Rule 4: Circular Cash Movement (10)
     mon_dir AS (
         SELECT
             mobile_number,
@@ -275,7 +282,7 @@ BEGIN
             MAX(
                 CASE
                     WHEN recv > 0 AND sent > 0
-                     AND ABS(recv - sent) / GREATEST(recv, sent) <= 0.05
+                     AND ABS(recv - sent) / GREATEST(recv, sent) <= 0.03
                     THEN 1 ELSE 0
                 END
             ) = 1 AS flag
@@ -284,58 +291,41 @@ BEGIN
     ),
 
     -- Rule 5: Shared Counterparties (20)
-    -- Reuse p2p_counterparty from txn (single-subscriber window). Fanout is
-    -- checked only for those senders; LIKE pre-filter avoids a full-table REGEXP
-    -- pass that blocked procedure redeploy via metadata locks.
-    target_senders AS (
-        SELECT DISTINCT p2p_counterparty AS sender
-        FROM   txn
-        WHERE  is_p2p_recv
-          AND  p2p_counterparty IS NOT NULL
-          AND  p2p_counterparty <> ''
-    ),
-    sender_fanout AS (
-        SELECT
-            TRIM(
-                REGEXP_REPLACE(
-                    REGEXP_REPLACE(s.details, '[ \\t]+', ' '),
-                    '^.*-[ \\t]*[0-9*]+[ \\t]+',
-                    ''
-                )
-            ) AS sender
-        FROM tbl_raw_mpesa_statements s
-        WHERE s.transaction_type = 'RECEIVED MONEY'
-          AND s.transaction_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
-          AND s.details LIKE '%-%'
-          AND s.details REGEXP '-[ \\t]*[0-9*]+[ \\t]+.+'
-          AND EXISTS (
-              SELECT 1
-              FROM   target_senders ts
-              WHERE  ts.sender <> ''
-                AND  s.details LIKE CONCAT('%', ts.sender, '%')
-          )
-        GROUP BY sender
-        HAVING COUNT(DISTINCT s.mobile_number) > 5
-    ),
+    -- P2P received from more than two customers already scored >80 in tbl_fraud_rules.
     shared AS (
         SELECT sc.mobile_number, 1 AS flag
         FROM   scope sc
-        WHERE  EXISTS (
-            SELECT 1
-            FROM   target_senders ts
-            INNER JOIN sender_fanout sf ON sf.sender = ts.sender
-        )
+        WHERE  (
+            SELECT COUNT(DISTINCT fr.mobile_number)
+            FROM   txn t
+            INNER JOIN tbl_fraud_rules fr
+                ON  fr.total_score > 80
+                AND fr.mobile_number <> sc.mobile_number
+            WHERE  t.mobile_number = sc.mobile_number
+              AND  t.is_p2p_recv
+              AND  t.w6m
+              AND  t.details REGEXP '-[ \\t]*[0-9*]+[ \\t]+.+'
+              AND  t.details LIKE CONCAT(
+                       '%- ',
+                       LEFT(fr.mobile_number, 6),
+                       '%',
+                       RIGHT(fr.mobile_number, 3),
+                       '%'
+                   )
+        ) > 2
     ),
 
     disb AS (
         SELECT mobile_number, receipt_no, tdate, ts, amount, ref_date
         FROM   txn
         WHERE  is_loan_disb
+          AND  NOT is_fuliza
     ),
     loan_repay_dates AS (
         SELECT mobile_number, tdate AS repay_date
         FROM   txn
         WHERE  is_loan_repay
+          AND  NOT is_fuliza
     ),
 
     -- Rule 7: Borrowing for Betting (20)
@@ -453,7 +443,7 @@ BEGIN
                 CASE WHEN f_device     THEN 40 ELSE 0 END
               + CASE WHEN f_sim        THEN 25 ELSE 0 END
               + CASE WHEN f_network    THEN 30 ELSE 0 END
-              + CASE WHEN f_circular   THEN 20 ELSE 0 END
+              + CASE WHEN f_circular   THEN 10 ELSE 0 END
               + CASE WHEN f_shared     THEN 20 ELSE 0 END
               + CASE WHEN f_income     THEN 15 ELSE 0 END
               + CASE WHEN f_borrow_bet THEN 20 ELSE 0 END
@@ -489,7 +479,7 @@ BEGIN
                 CASE WHEN f_device     THEN 'Device Multi-ID Linkage (40)' END,
                 CASE WHEN f_sim        THEN 'SIM/Phone Recency Check (25)' END,
                 CASE WHEN f_network    THEN 'Network Concentration Analysis (30)' END,
-                CASE WHEN f_circular   THEN 'Circular Cash Movement (20)' END,
+                CASE WHEN f_circular   THEN 'Circular Cash Movement (10)' END,
                 CASE WHEN f_shared     THEN 'Shared Counterparties (20)' END,
                 CASE WHEN f_income     THEN 'Sudden Income Inflation (15)' END,
                 CASE WHEN f_borrow_bet THEN 'Borrowing for Betting (20)' END,

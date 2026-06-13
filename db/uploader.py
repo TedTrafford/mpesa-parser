@@ -6,9 +6,9 @@ Handles uploading a parsed M-PESA DataFrame to `tbl_raw_mpesa_statements`
 and writing processing audit logs to `tbl_file_processing_logs`.
 
 Schema management (table creation, column additions, data migrations) is
-handled entirely by db/migrate.py.  Call ensure_table_exists() once at
-startup to apply any pending migrations and deploy the fly_profiling
-stored procedure.
+handled entirely by db/migrate.py.  Call ensure_table_exists() to apply
+pending migrations.  Redeploy stored procedures explicitly via
+``python -m db.deploy_procedures`` (see scripts/server-deploy.sh).
 
 Duplicate rows are silently skipped thanks to INSERT IGNORE — re-running the
 parser against the same PDF will not create duplicate records, and skipped
@@ -72,18 +72,23 @@ COLUMN_MAP = {
 
 
 
-def deploy_procedures() -> None:
-    """Redeploy every .sql procedure body in db/procedures/ (excludes *_drop.sql)."""
+def deploy_procedures(*, kill_blockers: bool = False) -> None:
+    """Redeploy every .sql procedure body in db/procedures/ (excludes *_drop.sql).
+
+    When *kill_blockers* is True, terminate in-flight fly_profiling / fraud-rule
+    queries that hold procedure metadata locks before each DROP attempt.
+    """
     engine = get_engine()
     with engine.begin() as conn:
-        _deploy_all_procedures(conn)
+        _deploy_all_procedures(conn, kill_blockers=kill_blockers)
 
 
 def ensure_table_exists() -> None:
-    """Apply all pending database migrations and deploy the fly_profiling procedure.
+    """Apply all pending database migrations.
 
-    Safe to call on every startup — migrations are tracked in schema_migrations
-    and each runs exactly once.  Subsequent calls are no-ops.
+    Safe to call on every upload — migrations are tracked in schema_migrations
+    and each runs exactly once.  Stored procedures are NOT redeployed here;
+    run ``python -m db.deploy_procedures`` during release instead.
     """
     _db_dir = os.path.dirname(os.path.abspath(__file__))
     if _db_dir not in sys.path:
@@ -92,7 +97,6 @@ def ensure_table_exists() -> None:
 
     engine = get_engine()
     run_migrations(engine)
-    deploy_procedures()
 
 # ---------------------------------------------------------------------------
 # Custom pandas to_sql method — INSERT IGNORE so duplicate receipt_no rows
@@ -132,6 +136,22 @@ _LOCK_WAIT_TIMEOUT_SEC = 60
 _DROP_MAX_RETRIES = 10
 _DROP_RETRY_PAUSE_SEC = 15
 
+# In-flight profiling work that holds metadata locks on procedure DROP.
+_PROFILING_BLOCKER_SQL = """
+    SELECT ID, USER, TIME, STATE, LEFT(COALESCE(INFO, ''), 160) AS info_snip
+    FROM information_schema.PROCESSLIST
+    WHERE ID != CONNECTION_ID()
+      AND COMMAND = 'Query'
+      AND STATE != 'Waiting for stored procedure metadata lock'
+      AND (
+            LOWER(COALESCE(INFO, '')) LIKE '%call fly_profiling%'
+         OR LOWER(COALESCE(INFO, '')) LIKE '%call sp_populate_fraud_rules%'
+         OR LOWER(COALESCE(INFO, '')) LIKE '%call sp_populate_rejection_reasons%'
+         OR LOWER(COALESCE(INFO, '')) LIKE '%insert into tbl_fraud_rules%'
+         OR LOWER(COALESCE(INFO, '')) LIKE '%insert into tbl_rejection_reasons%'
+      )
+"""
+
 
 def _procedure_sql_files() -> list[str]:
     """Return procedure .sql filenames; callers (fly_profiling) deploy last."""
@@ -149,9 +169,47 @@ def _procedure_sql_files() -> list[str]:
     )
 
 
-def _drop_procedure_with_retry(conn, proc_name: str) -> None:
+def _profiling_blocker_threads(conn) -> list[dict]:
+    return [dict(row) for row in conn.execute(text(_PROFILING_BLOCKER_SQL)).mappings()]
+
+
+def _log_profiling_blockers(conn, proc_name: str) -> None:
+    blockers = _profiling_blocker_threads(conn)
+    if not blockers:
+        print(
+            f"  DB: metadata lock on `{proc_name}` but no profiling query visible "
+            "(may be idle inside a CALL). Check SHOW FULL PROCESSLIST."
+        )
+        return
+    print(f"  DB: {len(blockers)} connection(s) blocking `{proc_name}`:")
+    for row in blockers:
+        print(
+            f"       Id={row['ID']} User={row['USER']} Time={row['TIME']}s "
+            f"State={row['STATE']} Info={row['info_snip']!r}"
+        )
+        print(f"       KILL {row['ID']};")
+
+
+def _kill_profiling_blockers(conn) -> int:
+    blockers = _profiling_blocker_threads(conn)
+    for row in blockers:
+        conn.execute(text(f"KILL {row['ID']}"))
+        print(
+            f"  DB: killed connection Id={row['ID']} "
+            f"(running {row['TIME']}s): {row['info_snip']!r}"
+        )
+    return len(blockers)
+
+
+def _drop_procedure_with_retry(
+    conn, proc_name: str, *, kill_blockers: bool = False
+) -> None:
     """DROP with bounded lock wait; retry while callers hold metadata locks."""
     for attempt in range(1, _DROP_MAX_RETRIES + 1):
+        if kill_blockers:
+            killed = _kill_profiling_blockers(conn)
+            if killed:
+                time.sleep(1)
         try:
             conn.execute(
                 text(f"SET SESSION lock_wait_timeout = {_LOCK_WAIT_TIMEOUT_SEC}")
@@ -163,22 +221,25 @@ def _drop_procedure_with_retry(conn, proc_name: str) -> None:
             if "1205" not in err and "lock wait timeout" not in err:
                 raise
             if attempt == _DROP_MAX_RETRIES:
+                _log_profiling_blockers(conn, proc_name)
                 raise RuntimeError(
                     f"Could not DROP PROCEDURE `{proc_name}` after "
                     f"{_DROP_MAX_RETRIES} attempts (~"
                     f"{_DROP_MAX_RETRIES * _LOCK_WAIT_TIMEOUT_SEC}s). "
-                    "An active CALL is holding a metadata lock — check "
-                    "SHOW FULL PROCESSLIST; stop app workers or wait for "
-                    "long fly_profiling runs to finish, then redeploy."
+                    "Stop parse workers, run with --kill-blockers, or KILL the "
+                    "connections listed above, then redeploy."
                 ) from exc
             print(
                 f"  DB: metadata lock on `{proc_name}` "
                 f"(attempt {attempt}/{_DROP_MAX_RETRIES}) — retrying..."
             )
+            _log_profiling_blockers(conn, proc_name)
+            if kill_blockers:
+                _kill_profiling_blockers(conn)
             time.sleep(_DROP_RETRY_PAUSE_SEC)
 
 
-def _deploy_all_procedures(conn) -> None:
+def _deploy_all_procedures(conn, *, kill_blockers: bool = False) -> None:
     """Read every .sql file in db/procedures/ and (re)create each stored procedure.
 
     For each file the deployer:
@@ -258,7 +319,7 @@ def _deploy_all_procedures(conn) -> None:
             continue
         proc_name = m.group(1)
 
-        _drop_procedure_with_retry(conn, proc_name)
+        _drop_procedure_with_retry(conn, proc_name, kill_blockers=kill_blockers)
         conn.execute(text(proc_sql))
         print(f"  DB: procedure `{proc_name}` deployed")
 

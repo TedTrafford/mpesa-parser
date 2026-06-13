@@ -27,7 +27,7 @@ cd "$DEPLOY_PATH"
 
 # -- 1. Pull latest code from main -------------------------------------------
 echo ""
-echo "[1/4] Pulling latest code..."
+echo "[1/5] Pulling latest code..."
 git fetch --prune origin
 git checkout main
 git reset --hard origin/main
@@ -35,7 +35,7 @@ echo "  HEAD is now at: $(git rev-parse --short HEAD) -- $(git log -1 --pretty=%
 
 # -- 2. Ensure virtualenv exists and sync dependencies -----------------------
 echo ""
-echo "[2/4] Syncing Python dependencies..."
+echo "[2/5] Syncing Python dependencies..."
 
 if [ -f "$DEPLOY_PATH/.venv/bin/activate" ]; then
     VENV_ACTIVATE="$DEPLOY_PATH/.venv/bin/activate"
@@ -61,7 +61,7 @@ echo "  Dependencies up to date."
 # config.py auto-loads .env, but we also export it here as a safety net so the
 # migration step provably targets the same database as the parser worker.
 echo ""
-echo "[3/4] Applying database migrations..."
+echo "[3/5] Applying database migrations..."
 if [ -f "$DEPLOY_PATH/.env" ]; then
     set -a
     # shellcheck source=/dev/null
@@ -74,16 +74,22 @@ fi
 python db/migrate.py
 echo "  Migrations up to date."
 
-# -- 4. Optional: restart a long-running systemd service ---------------------
+# -- 4. Redeploy stored procedures -------------------------------------------
+echo ""
+echo "[4/5] Redeploying stored procedures..."
+python -m db.deploy_procedures --kill-blockers
+echo "  Procedures up to date."
+
+# -- 5. Optional: restart a long-running systemd service ---------------------
 # Uncomment if you run parse_single.py as a persistent service named "mpesa-parser":
 #
 # echo ""
-# echo "[4/4] Restarting service..."
+# echo "[5/5] Restarting service..."
 # sudo systemctl restart mpesa-parser
 # sudo systemctl status  mpesa-parser --no-pager
 
 echo ""
-echo "[4/4] No persistent service to restart (on-demand processing model)."
+echo "[5/5] No persistent service to restart (on-demand processing model)."
 
 echo ""
 echo "=================================================="
