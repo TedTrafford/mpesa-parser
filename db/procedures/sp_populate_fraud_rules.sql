@@ -59,6 +59,7 @@ BEGIN
             s.receipt_no,
             s.amount,
             s.balance,
+            s.details,
             TIMESTAMP(s.transaction_date, s.transaction_time) AS ts,
             s.transaction_date                              AS tdate,
             DATE_FORMAT(s.transaction_date, '%Y-%m')        AS ym,
