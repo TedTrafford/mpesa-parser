@@ -342,7 +342,7 @@ Subscribers with `debt_to_income_ratio > 0.50` (50 %) are hard-gated to `not_qua
 | `enhancement_pct` | `DECIMAL(5,2)` | Matrix percentage (e.g. `40.00` = 40 %) |
 | `enhanced_limit` | `INT` | `ROUND(current_limit × (1 + enhancement_pct / 100))` |
 | `profiling_category` | `VARCHAR(20)` | Revisioned label when applied — `ENHANCED_1`, `ENHANCED_2`, … (incremented from prior applied rows) |
-| `is_eligible` | `TINYINT(1)` | `1` only when all five eligibility gates pass and a matrix cell exists |
+| `is_eligible` | `TINYINT(1)` | `1` only when all six eligibility gates pass and a matrix cell exists |
 | `eligibility_detail` | `TEXT` | Semicolon-separated reasons when ineligible |
 | `applied` | `TINYINT(1)` | `1` when `p_apply = 1` and the enhanced limit was written |
 | `last_loan_days_late` | `INT` | Days between final due date and final payment on last closed loan |
@@ -581,8 +581,9 @@ CALL sp_apply_credit_limit_enhancement(p_mobile_number, p_apply);
 | 3 | Current limit held for ≥ 14 days | `customer_credit_limit.profiling_date` |
 | 4 | Not fraud-flagged (`Reject` or `Manual Review`) | `tbl_fraud_rules` |
 | 5 | Debt-to-income ratio < 50 % (not actively lender-dependent) | `tbl_subscriber_profiles.debt_to_income_ratio` |
+| 6 | At least 3 closed loans on record (first increase only from the 3rd repaid loan) | `production.customers`, `production.loans` |
 
-Customers with no closed loan fail gate 1 (`No closed loan on record`).
+Customers with no closed loan fail gate 1 (`No closed loan on record`). Customers with 1–2 closed loans fail gate 6 even when all other gates pass — no limit increase is granted after paying only the first or second loan.
 
 **Turnover segments** (X-axis — same `three_month_wavg` thresholds as `fly_profiling`):
 
@@ -679,9 +680,10 @@ Reasons are refreshed on each enhancement run (prior rows for the scope are dele
 | `LEM_EXCESSIVE_ARREARS` | Any loan in last 12 months exceeded 90 days overdue | 1 or 2 |
 | `LEM_NO_CLOSED_LOAN` | No closed loan on record | 1 – 3 |
 | `LEM_LATE_LOAN_REPAYMENT` | Last loan repaid > 3 days after final due date | 1 – 3 |
-| `LEM_HIGH_DEBT_TO_INCOME` | `debt_to_income_ratio` ≥ 50 % | 1 – 4 |
-| `LEM_LIMIT_TENURE_INSUFFICIENT` | Current limit held < 14 days | 1 – 5 |
-| `LEM_NO_MATRIX_CELL` | No enhancement % for limit band × turnover segment | 1 – 6 |
+| `LEM_INSUFFICIENT_CLOSED_LOANS` | Fewer than 3 closed loans (first increase requires 3 repaid loans) | 1 – 4 |
+| `LEM_HIGH_DEBT_TO_INCOME` | `debt_to_income_ratio` ≥ 50 % | 1 – 5 |
+| `LEM_LIMIT_TENURE_INSUFFICIENT` | Current limit held < 14 days | 1 – 6 |
+| `LEM_NO_MATRIX_CELL` | No enhancement % for limit band × turnover segment | 1 – 7 |
 
 ```sql
 -- Called automatically by sp_apply_credit_limit_enhancement; can also run standalone:
