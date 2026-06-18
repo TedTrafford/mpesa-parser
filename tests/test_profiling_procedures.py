@@ -205,6 +205,7 @@ class TestProcedureSources:
         assert f"{LMS_SCHEMA}.customers" in enhancement_sql
         assert "deleted_at IS NULL" in enhancement_sql
         assert "enhancement_pct" in enhancement_sql
+        assert "proposed_limit" in enhancement_sql
         assert "profiling_category" in enhancement_sql
         assert "ENHANCED_" in enhancement_sql
         assert "closed_loan_count >= 3" in enhancement_sql

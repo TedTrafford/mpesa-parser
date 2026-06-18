@@ -102,7 +102,8 @@ Each transaction row extracted from the PDF is deduplicated against the database
 │   │   ├── 0020_create_credit_limit_enhancements.sql
 │   │   ├── 0021_create_tbl_LEM_rejection_reasons.sql
 │   │   ├── 0022_add_profiling_category_to_credit_limit_enhancements.sql
-│   │   └── 0023_widen_ccl_profiling_category.sql
+│   │   ├── 0023_widen_ccl_profiling_category.sql
+│   │   └── 0024_add_proposed_limit_to_credit_limit_enhancements.sql
 │   └── procedures/
 │       ├── fly_profiling.sql                         # Credit-scoring stored procedure
 │       ├── sp_populate_fraud_rules.sql               # Fraud / gaming risk evaluation
@@ -340,11 +341,12 @@ Subscribers with `debt_to_income_ratio > 0.50` (50 %) are hard-gated to `not_qua
 | `turnover_segment` | `TINYINT` | 1–8, derived from `three_month_wavg` (same thresholds as `fly_profiling`) |
 | `limit_band` | `VARCHAR(20)` | `1k_5k`, `5k_10k`, `10k_20k`, `20k_30k`, or `30k_40k` |
 | `enhancement_pct` | `DECIMAL(5,2)` | Matrix percentage (e.g. `40.00` = 40 %) |
-| `enhanced_limit` | `INT` | `ROUND(current_limit × (1 + enhancement_pct / 100))` |
+| `proposed_limit` | `INT` | Matrix target — `ROUND(current_limit × (1 + enhancement_pct / 100))`; populated whenever a matrix cell exists, regardless of eligibility |
+| `enhanced_limit` | `INT` | Resulting limit after this evaluation — equals `proposed_limit` when eligible, otherwise `current_limit` (no increase applied) |
 | `profiling_category` | `VARCHAR(20)` | Revisioned label when applied — `ENHANCED_1`, `ENHANCED_2`, … (incremented from prior applied rows) |
 | `is_eligible` | `TINYINT(1)` | `1` only when all six eligibility gates pass and a matrix cell exists |
 | `eligibility_detail` | `TEXT` | Semicolon-separated reasons when ineligible |
-| `applied` | `TINYINT(1)` | `1` when `p_apply = 1` and the enhanced limit was written |
+| `applied` | `TINYINT(1)` | `1` when `p_apply = 1` and `proposed_limit` was written to `customer_credit_limit` |
 | `last_loan_days_late` | `INT` | Days between final due date and final payment on last closed loan |
 | `max_arrears_days_1y` | `INT` | Peak `days_overdue` on any installment in the last 12 months |
 | `limit_age_days` | `INT` | Days since `customer_credit_limit.profiling_date` |
@@ -563,7 +565,7 @@ CALL sp_apply_credit_limit_enhancement(p_mobile_number, p_apply);
 | Parameter | Type | Description |
 |---|---|---|
 | `p_mobile_number` | `VARCHAR(20)` | Customer mobile (`254xxx`), or `NULL` for batch (all customers with `credit_limit >= 1000`) |
-| `p_apply` | `TINYINT(1)` | `0` or `NULL` = evaluate only; `1` = also write the enhanced limit to `customer_credit_limit` (both parameters are required — MySQL does not support parameter defaults) |
+| `p_apply` | `TINYINT(1)` | `0` or `NULL` = evaluate only; `1` = also write `proposed_limit` to `customer_credit_limit` (both parameters are required — MySQL does not support parameter defaults) |
 
 **Data sources:**
 
@@ -623,10 +625,14 @@ Empty cells mean no enhancement is available for that combination.
 The matrix percentage is an **increment on top of** the current limit, not a replacement factor:
 
 ```
-enhanced_limit = ROUND(current_limit × (1 + enhancement_pct / 100))
+proposed_limit = ROUND(current_limit × (1 + enhancement_pct / 100))
+enhanced_limit = proposed_limit   (when all eligibility gates pass)
+enhanced_limit = current_limit    (when ineligible — limit unchanged)
 ```
 
-Example: limit KES 1,000 in band `1k_5k` at turnover segment 8 (60 %) → `1,000 × 1.60 = 1,600`.
+Example (eligible): limit KES 1,000 in band `1k_5k` at turnover segment 8 (60 %) → `proposed_limit = 1,000 × 1.60 = 1,600`, `enhanced_limit = 1,600`.
+
+Example (ineligible): same matrix cell but gates fail → `proposed_limit = 8,000`, `enhanced_limit = 5,000` (stays at `current_limit`).
 
 After each evaluation, `sp_populate_LEM_rejection_reasons` is called automatically. Ineligible customers (`is_eligible = 0`) receive one or more ranked rows in `tbl_LEM_rejection_reasons`; eligible customers receive none.
 
@@ -639,19 +645,26 @@ CALL sp_apply_credit_limit_enhancement('254722123456', 0);
 -- Batch evaluate all customers with limit >= 1 000
 CALL sp_apply_credit_limit_enhancement(NULL, 0);
 
--- Evaluate and apply (writes enhanced limit)
+-- Evaluate and apply (writes proposed_limit to customer_credit_limit)
 CALL sp_apply_credit_limit_enhancement('254722123456', 1);
 
 -- Review eligible customers
 SELECT mobile_number, current_limit, turnover_segment, enhancement_pct,
-       enhanced_limit
+       proposed_limit, enhanced_limit
 FROM   tbl_credit_limit_enhancements
 WHERE  is_eligible = 1
 ORDER  BY evaluated_at DESC;
 
+-- Review ineligible customers (proposed vs actual limit)
+SELECT mobile_number, current_limit, proposed_limit, enhanced_limit,
+       is_eligible, eligibility_detail
+FROM   tbl_credit_limit_enhancements
+WHERE  is_eligible = 0
+ORDER  BY evaluated_at DESC;
+
 -- Review ineligible customers with ranked LEM rejection reasons
-SELECT e.mobile_number, e.current_limit, e.is_eligible,
-       r.reason_rank, r.reason_code, r.reason_detail
+SELECT e.mobile_number, e.current_limit, e.proposed_limit, e.enhanced_limit,
+       e.is_eligible, r.reason_rank, r.reason_code, r.reason_detail
 FROM   tbl_credit_limit_enhancements e
 JOIN   tbl_LEM_rejection_reasons r ON r.enhancement_id = e.id
 WHERE  e.is_eligible = 0
@@ -661,10 +674,10 @@ ORDER  BY e.evaluated_at DESC, r.reason_rank;
 When `p_apply = 1` and the customer is eligible, the procedure:
 
 - Deletes the prior `customer_credit_limit` row for that mobile number
-- Inserts a new row with `credit_limit = enhanced_limit` and `profiling_category = ENHANCED_N` (revision increments from the last applied enhancement)
+- Inserts a new row with `credit_limit = proposed_limit` and `profiling_category = ENHANCED_N` (revision increments from the last applied enhancement)
 - Marks the evaluation row as `applied = 1`
 
-Table DDL: migrations `0020` and `0022`. Procedure: `db/procedures/sp_apply_credit_limit_enhancement.sql`.
+Table DDL: migrations `0020`, `0022`, and `0024`. Procedure: `db/procedures/sp_apply_credit_limit_enhancement.sql`.
 
 ### LEM rejection reasons
 

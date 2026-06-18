@@ -6,6 +6,7 @@
 -- Soft-delete uses deleted_at IS NULL. Approved limits are written to
 -- customer_credit_limit only.
 -- tbl_credit_limit_enhancements keeps full run history; readers use latest row.
+-- proposed_limit = matrix target; enhanced_limit = resulting limit (unchanged if ineligible).
 
 CREATE DEFINER=`production`@`%` PROCEDURE `Data_Science`.`sp_apply_credit_limit_enhancement`(
     IN p_mobile_number VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
@@ -31,7 +32,7 @@ BEGIN
     INSERT INTO tbl_credit_limit_enhancements (
         customer_id, mobile_number, evaluated_at,
         current_limit, turnover_segment, three_month_wavg,
-        limit_band, enhancement_pct, enhanced_limit, profiling_category,
+        limit_band, enhancement_pct, proposed_limit, enhanced_limit, profiling_category,
         is_eligible, eligibility_detail, applied,
         last_loan_days_late, max_arrears_days_1y, limit_age_days,
         fraud_decision, debt_to_income_ratio
@@ -299,6 +300,13 @@ BEGIN
             THEN ROUND(current_limit * (1 + enhancement_pct))
             ELSE NULL
         END,
+        CASE
+            WHEN enhancement_pct IS NOT NULL
+             AND elig_gate1 AND elig_gate2 AND elig_gate3 AND elig_gate4 AND elig_gate5
+             AND elig_gate6
+            THEN ROUND(current_limit * (1 + enhancement_pct))
+            ELSE current_limit
+        END,
         profiling_category,
         (
             elig_gate1 AND elig_gate2 AND elig_gate3 AND elig_gate4 AND elig_gate5
@@ -366,8 +374,8 @@ BEGIN
             GROUP  BY mobile_number
         ) latest ON latest.latest_id = e.id
         WHERE  e.is_eligible    = 1
-          AND  e.enhanced_limit IS NOT NULL
-          AND  e.enhanced_limit > e.current_limit
+          AND  e.proposed_limit IS NOT NULL
+          AND  e.proposed_limit > e.current_limit
           AND  (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number);
 
         INSERT INTO customer_credit_limit (
@@ -375,7 +383,7 @@ BEGIN
         )
         SELECT
             e.mobile_number,
-            e.enhanced_limit,
+            e.proposed_limit,
             NOW(),
             e.profiling_category
         FROM tbl_credit_limit_enhancements e
@@ -386,8 +394,8 @@ BEGIN
             GROUP  BY mobile_number
         ) latest ON latest.latest_id = e.id
         WHERE  e.is_eligible    = 1
-          AND  e.enhanced_limit IS NOT NULL
-          AND  e.enhanced_limit > e.current_limit
+          AND  e.proposed_limit IS NOT NULL
+          AND  e.proposed_limit > e.current_limit
           AND  (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number);
 
         UPDATE tbl_credit_limit_enhancements e
@@ -400,8 +408,8 @@ BEGIN
         SET    e.applied    = 1,
                e.applied_at = NOW()
         WHERE  e.is_eligible    = 1
-          AND  e.enhanced_limit IS NOT NULL
-          AND  e.enhanced_limit > e.current_limit
+          AND  e.proposed_limit IS NOT NULL
+          AND  e.proposed_limit > e.current_limit
           AND  (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number);
     END IF;
 
