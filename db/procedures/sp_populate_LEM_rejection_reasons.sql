@@ -26,7 +26,8 @@ BEGIN
     SELECT e.id, e.customer_id, e.mobile_number, e.is_eligible,
            e.fraud_decision, e.max_arrears_days_1y, e.last_loan_days_late,
            e.debt_to_income_ratio, e.limit_age_days, e.current_limit,
-           e.limit_band, e.turnover_segment, e.enhancement_pct
+           e.limit_band, e.turnover_segment, e.enhancement_pct,
+           COALESCE(cl.closed_loan_count, 0) AS closed_loan_count
     FROM (
         SELECT e2.*,
                ROW_NUMBER() OVER (
@@ -36,6 +37,13 @@ BEGIN
         FROM tbl_credit_limit_enhancements e2
         WHERE (p_mobile_number IS NULL OR e2.mobile_number = p_mobile_number)
     ) e
+    LEFT JOIN (
+        SELECT l.customer_id, COUNT(*) AS closed_loan_count
+        FROM production.loans l
+        WHERE l.deleted_at IS NULL
+          AND l.loan_status = 'closed'
+        GROUP BY l.customer_id
+    ) cl ON cl.customer_id = e.customer_id
     WHERE e.rn = 1;
 
     -- -----------------------------------------------------------------------
@@ -43,7 +51,7 @@ BEGIN
     -- Priority order for ranks:
     --   1 LEM_FRAUD_FLAG
     --   2 LEM_EXCESSIVE_ARREARS
-    --   3 LEM_NO_CLOSED_LOAN / LEM_LATE_LOAN_REPAYMENT
+    --   3 LEM_NO_CLOSED_LOAN / LEM_LATE_LOAN_REPAYMENT / LEM_INSUFFICIENT_CLOSED_LOANS
     --   4 LEM_HIGH_DEBT_TO_INCOME
     --   5 LEM_LIMIT_TENURE_INSUFFICIENT
     --   6 LEM_NO_MATRIX_CELL
@@ -174,6 +182,45 @@ BEGIN
     FROM cands c
     WHERE c.fail_late = 1;
 
+    -- Reason LEM_INSUFFICIENT_CLOSED_LOANS
+    INSERT INTO tbl_LEM_rejection_reasons
+        (mobile_number, customer_id, enhancement_id, reason_rank, reason_code,
+         reason_detail, metric_name, metric_value)
+    WITH cands AS (
+        SELECT
+            e.id AS enhancement_id,
+            e.mobile_number,
+            e.customer_id,
+            e.closed_loan_count,
+            e.fraud_decision,
+            e.max_arrears_days_1y,
+            e.last_loan_days_late,
+            CASE WHEN e.fraud_decision IN ('Reject', 'Manual Review') THEN 1 ELSE 0 END AS fail_fraud,
+            CASE WHEN COALESCE(e.max_arrears_days_1y, 0) > 90 THEN 1 ELSE 0 END       AS fail_arrears,
+            CASE WHEN e.last_loan_days_late IS NULL THEN 1 ELSE 0 END                 AS fail_no_loan,
+            CASE WHEN e.last_loan_days_late IS NOT NULL AND e.last_loan_days_late > 3 THEN 1 ELSE 0 END AS fail_late,
+            CASE WHEN e.closed_loan_count < 3 THEN 1 ELSE 0 END                       AS fail_min_loans
+        FROM tmp_latest_enhancement e
+        WHERE e.is_eligible = 0
+    )
+    SELECT
+        c.mobile_number,
+        c.customer_id,
+        c.enhancement_id,
+        1 + c.fail_fraud + c.fail_arrears + c.fail_no_loan + c.fail_late,
+        'LEM_INSUFFICIENT_CLOSED_LOANS',
+        CONCAT(
+            'Customer has only ', c.closed_loan_count,
+            ' closed loan(s). A minimum of 3 successfully repaid loans is required ',
+            'before the first credit limit increase.'
+        ),
+        'closed_loan_count',
+        c.closed_loan_count
+    FROM cands c
+    WHERE c.fail_min_loans = 1
+      AND c.fail_no_loan = 0
+      AND c.fail_late = 0;
+
     -- Reason LEM_HIGH_DEBT_TO_INCOME
     INSERT INTO tbl_LEM_rejection_reasons
         (mobile_number, customer_id, enhancement_id, reason_rank, reason_code,
@@ -191,6 +238,7 @@ BEGIN
             CASE WHEN COALESCE(e.max_arrears_days_1y, 0) > 90 THEN 1 ELSE 0 END       AS fail_arrears,
             CASE WHEN e.last_loan_days_late IS NULL
                   OR e.last_loan_days_late > 3 THEN 1 ELSE 0 END                      AS fail_repay,
+            CASE WHEN e.closed_loan_count < 3 THEN 1 ELSE 0 END                       AS fail_min_loans,
             CASE WHEN e.debt_to_income_ratio >= 0.5000 THEN 1 ELSE 0 END            AS fail_dti
         FROM tmp_latest_enhancement e
         WHERE e.is_eligible = 0
@@ -199,7 +247,7 @@ BEGIN
         c.mobile_number,
         c.customer_id,
         c.enhancement_id,
-        1 + c.fail_fraud + c.fail_arrears + c.fail_repay,
+        1 + c.fail_fraud + c.fail_arrears + c.fail_repay + c.fail_min_loans,
         'LEM_HIGH_DEBT_TO_INCOME',
         CONCAT(
             'Debt-to-income ratio is ', ROUND(c.debt_to_income_ratio * 100, 1),
@@ -229,6 +277,7 @@ BEGIN
             CASE WHEN COALESCE(e.max_arrears_days_1y, 0) > 90 THEN 1 ELSE 0 END       AS fail_arrears,
             CASE WHEN e.last_loan_days_late IS NULL
                   OR e.last_loan_days_late > 3 THEN 1 ELSE 0 END                      AS fail_repay,
+            CASE WHEN e.closed_loan_count < 3 THEN 1 ELSE 0 END                       AS fail_min_loans,
             CASE WHEN e.debt_to_income_ratio >= 0.5000 THEN 1 ELSE 0 END            AS fail_dti,
             CASE WHEN e.limit_age_days IS NULL OR e.limit_age_days < 14 THEN 1 ELSE 0 END AS fail_tenure
         FROM tmp_latest_enhancement e
@@ -238,7 +287,7 @@ BEGIN
         c.mobile_number,
         c.customer_id,
         c.enhancement_id,
-        1 + c.fail_fraud + c.fail_arrears + c.fail_repay + c.fail_dti,
+        1 + c.fail_fraud + c.fail_arrears + c.fail_repay + c.fail_min_loans + c.fail_dti,
         'LEM_LIMIT_TENURE_INSUFFICIENT',
         CONCAT(
             'Current credit limit has been held for only ',
@@ -272,6 +321,7 @@ BEGIN
             CASE WHEN COALESCE(e.max_arrears_days_1y, 0) > 90 THEN 1 ELSE 0 END       AS fail_arrears,
             CASE WHEN e.last_loan_days_late IS NULL
                   OR e.last_loan_days_late > 3 THEN 1 ELSE 0 END                      AS fail_repay,
+            CASE WHEN e.closed_loan_count < 3 THEN 1 ELSE 0 END                       AS fail_min_loans,
             CASE WHEN e.debt_to_income_ratio >= 0.5000 THEN 1 ELSE 0 END            AS fail_dti,
             CASE WHEN e.limit_age_days IS NULL OR e.limit_age_days < 14 THEN 1 ELSE 0 END AS fail_tenure,
             CASE WHEN e.enhancement_pct IS NULL THEN 1 ELSE 0 END                      AS fail_matrix
@@ -282,7 +332,8 @@ BEGIN
         c.mobile_number,
         c.customer_id,
         c.enhancement_id,
-        1 + c.fail_fraud + c.fail_arrears + c.fail_repay + c.fail_dti + c.fail_tenure,
+        1 + c.fail_fraud + c.fail_arrears + c.fail_repay + c.fail_min_loans
+            + c.fail_dti + c.fail_tenure,
         'LEM_NO_MATRIX_CELL',
         CONCAT(
             'No limit increase is defined in the enhancement matrix for limit band ''',

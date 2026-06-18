@@ -168,6 +168,18 @@ BEGIN
         LEFT JOIN arrears_1y a ON a.customer_id = s.customer_id
     ),
 
+    closed_loans AS (
+        SELECT
+            c.id AS customer_id,
+            COUNT(l.id) AS closed_loan_count
+        FROM production.customers c
+        INNER JOIN production.loans l ON l.customer_id = c.id
+        WHERE c.deleted_at IS NULL
+          AND l.deleted_at IS NULL
+          AND l.loan_status = 'closed'
+        GROUP BY c.id
+    ),
+
     prior_revision AS (
         SELECT
             e.mobile_number,
@@ -218,6 +230,7 @@ BEGIN
             COALESCE(glp.passed, 0) AS gate1_passed,
             gar.max_arrears_days AS max_arrears_days_1y,
             COALESCE(gar.passed, 1) AS gate2_passed,
+            COALESCE(cl.closed_loan_count, 0) AS closed_loan_count,
 
             CASE
                 WHEN lim.profiling_date IS NOT NULL
@@ -232,6 +245,7 @@ BEGIN
         LEFT JOIN fraud fr              ON fr.mobile_number   = lim.mobile_number
         LEFT JOIN gate_last_payment glp ON glp.customer_id    = lim.customer_id
         INNER JOIN gate_arrears gar     ON gar.customer_id    = lim.customer_id
+        LEFT JOIN closed_loans cl       ON cl.customer_id     = lim.customer_id
     ),
 
     scored AS (
@@ -265,7 +279,8 @@ BEGIN
             (
                 e.debt_to_income_ratio IS NULL
                 OR e.debt_to_income_ratio < 0.5000
-            ) AS elig_gate5
+            ) AS elig_gate5,
+            (e.closed_loan_count >= 3) AS elig_gate6
 
         FROM evaluated e
         LEFT JOIN prior_revision pr ON pr.mobile_number = e.mobile_number
@@ -287,6 +302,7 @@ BEGIN
         profiling_category,
         (
             elig_gate1 AND elig_gate2 AND elig_gate3 AND elig_gate4 AND elig_gate5
+            AND elig_gate6
             AND enhancement_pct IS NOT NULL
         ),
         CONCAT_WS('; ',
@@ -314,6 +330,11 @@ BEGIN
             CASE WHEN NOT elig_gate5 THEN CONCAT(
                 'Debt-to-income ratio >= 50% (',
                 ROUND(COALESCE(debt_to_income_ratio, 0) * 100, 1), '%)'
+            ) END,
+            CASE WHEN NOT elig_gate6 THEN CONCAT(
+                'Fewer than 3 closed loans on record (',
+                closed_loan_count,
+                ' closed). First limit increase requires at least 3 repaid loans'
             ) END,
             CASE WHEN enhancement_pct IS NULL THEN CONCAT(
                 'No enhancement in matrix for limit band ',
