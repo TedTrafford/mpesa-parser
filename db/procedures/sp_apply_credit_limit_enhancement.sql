@@ -7,6 +7,7 @@
 -- customer_credit_limit only.
 -- tbl_credit_limit_enhancements keeps full run history; readers use latest row.
 -- proposed_limit = matrix target; enhanced_limit = resulting limit (unchanged if ineligible).
+-- profiling_category: evaluation_* when p_apply = 0; not_enhanced / ENHANCED_N when p_apply = 1.
 
 CREATE DEFINER=`production`@`%` PROCEDURE `Data_Science`.`sp_apply_credit_limit_enhancement`(
     IN p_mobile_number VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
@@ -181,18 +182,6 @@ BEGIN
         GROUP BY c.id
     ),
 
-    prior_revision AS (
-        SELECT
-            e.mobile_number,
-            COALESCE(MAX(
-                CAST(REGEXP_REPLACE(e.profiling_category, '[^0-9]', '') AS UNSIGNED)
-            ), 0) AS last_revision
-        FROM tbl_credit_limit_enhancements e
-        WHERE e.applied = 1
-          AND e.profiling_category LIKE 'ENHANCED\_%'
-        GROUP BY e.mobile_number
-    ),
-
     evaluated AS (
         SELECT
             lim.customer_id,
@@ -252,7 +241,6 @@ BEGIN
     scored AS (
         SELECT
             e.*,
-            CONCAT('ENHANCED_', COALESCE(pr.last_revision, 0) + 1) AS profiling_category,
 
             CASE e.limit_band
                 WHEN '30k_40k' THEN CASE e.turnover_segment
@@ -284,7 +272,17 @@ BEGIN
             (e.closed_loan_count >= 3) AS elig_gate6
 
         FROM evaluated e
-        LEFT JOIN prior_revision pr ON pr.mobile_number = e.mobile_number
+    ),
+
+    labeled AS (
+        SELECT
+            s.*,
+            (
+                s.elig_gate1 AND s.elig_gate2 AND s.elig_gate3 AND s.elig_gate4
+                AND s.elig_gate5 AND s.elig_gate6
+                AND s.enhancement_pct IS NOT NULL
+            ) AS is_eligible
+        FROM scored s
     )
     SELECT
         customer_id,
@@ -307,12 +305,13 @@ BEGIN
             THEN ROUND(current_limit * (1 + enhancement_pct))
             ELSE current_limit
         END,
-        profiling_category,
-        (
-            elig_gate1 AND elig_gate2 AND elig_gate3 AND elig_gate4 AND elig_gate5
-            AND elig_gate6
-            AND enhancement_pct IS NOT NULL
-        ),
+        CASE
+            WHEN p_apply = 0 AND is_eligible THEN 'evaluation_enhanced'
+            WHEN p_apply = 0                        THEN 'evaluation_not_enhanced'
+            WHEN p_apply = 1 AND is_eligible        THEN 'evaluation_enhanced'
+            ELSE                                         'not_enhanced'
+        END,
+        is_eligible,
         CONCAT_WS('; ',
             CASE WHEN NOT elig_gate1 THEN
                 CASE
@@ -357,7 +356,7 @@ BEGIN
         limit_age_days,
         fraud_decision,
         debt_to_income_ratio
-    FROM scored;
+    FROM labeled;
 
     -- Surface ranked reasons for ineligible customers.
     CALL sp_populate_LEM_rejection_reasons(p_mobile_number);
@@ -385,7 +384,15 @@ BEGIN
             e.mobile_number,
             e.proposed_limit,
             NOW(),
-            e.profiling_category
+            CONCAT('ENHANCED_', COALESCE((
+                SELECT MAX(
+                    CAST(REGEXP_REPLACE(e2.profiling_category, '[^0-9]', '') AS UNSIGNED)
+                )
+                FROM tbl_credit_limit_enhancements e2
+                WHERE e2.mobile_number = e.mobile_number
+                  AND e2.applied = 1
+                  AND e2.profiling_category LIKE 'ENHANCED\_%'
+            ), 0) + 1)
         FROM tbl_credit_limit_enhancements e
         INNER JOIN (
             SELECT mobile_number, MAX(id) AS latest_id
@@ -405,11 +412,39 @@ BEGIN
             WHERE  (p_mobile_number IS NULL OR mobile_number = p_mobile_number)
             GROUP  BY mobile_number
         ) latest ON latest.latest_id = e.id
-        SET    e.applied    = 1,
-               e.applied_at = NOW()
+        SET    e.applied            = 1,
+               e.applied_at         = NOW(),
+               e.profiling_category = CONCAT('ENHANCED_', COALESCE((
+                   SELECT MAX(
+                       CAST(REGEXP_REPLACE(e2.profiling_category, '[^0-9]', '') AS UNSIGNED)
+                   )
+                   FROM tbl_credit_limit_enhancements e2
+                   WHERE e2.mobile_number = e.mobile_number
+                     AND e2.applied = 1
+                     AND e2.profiling_category LIKE 'ENHANCED\_%'
+                     AND e2.id <> e.id
+               ), 0) + 1)
         WHERE  e.is_eligible    = 1
           AND  e.proposed_limit IS NOT NULL
           AND  e.proposed_limit > e.current_limit
+          AND  (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number);
+
+        UPDATE customer_credit_limit ccl
+        INNER JOIN tbl_credit_limit_enhancements e
+                ON e.mobile_number = ccl.mobile_number
+        INNER JOIN (
+            SELECT mobile_number, MAX(id) AS latest_id
+            FROM   tbl_credit_limit_enhancements
+            WHERE  (p_mobile_number IS NULL OR mobile_number = p_mobile_number)
+            GROUP  BY mobile_number
+        ) latest ON latest.latest_id = e.id
+        SET    ccl.profiling_category = 'not_enhanced',
+               ccl.profiling_date     = NOW()
+        WHERE  NOT (
+                   e.is_eligible = 1
+               AND e.proposed_limit IS NOT NULL
+               AND e.proposed_limit > e.current_limit
+               )
           AND  (p_mobile_number IS NULL OR e.mobile_number = p_mobile_number);
     END IF;
 

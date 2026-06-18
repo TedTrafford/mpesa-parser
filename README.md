@@ -58,7 +58,7 @@ Returning borrowers (on demand / scheduled):
            ↓
   tbl_LEM_rejection_reasons
            ↓
-  (optional, p_apply = 1) customer_credit_limit  (ENHANCED_1, ENHANCED_2, …)
+  (optional, p_apply = 1) customer_credit_limit  (ENHANCED_N if increased, not_enhanced if not)
 ```
 
 Each transaction row extracted from the PDF is deduplicated against the database using a composite key on `(receipt_no, amount)` — re-submitting the same PDF is safe.
@@ -103,7 +103,8 @@ Each transaction row extracted from the PDF is deduplicated against the database
 │   │   ├── 0021_create_tbl_LEM_rejection_reasons.sql
 │   │   ├── 0022_add_profiling_category_to_credit_limit_enhancements.sql
 │   │   ├── 0023_widen_ccl_profiling_category.sql
-│   │   └── 0024_add_proposed_limit_to_credit_limit_enhancements.sql
+│   │   ├── 0024_add_proposed_limit_to_credit_limit_enhancements.sql
+│   │   └── 0025_normalize_enhancement_profiling_category.sql
 │   └── procedures/
 │       ├── fly_profiling.sql                         # Credit-scoring stored procedure
 │       ├── sp_populate_fraud_rules.sql               # Fraud / gaming risk evaluation
@@ -288,7 +289,7 @@ Processes every PDF in the configured `INPUT_DIR` directory sequentially, upload
 | `mobile_number` | `VARCHAR(20)` | International format (`254xxx`) — consistent with all other tables |
 | `credit_limit` | `INT` | Whole-number amounts (0, 5000, 8000, …) |
 | `profiling_date` | `DATETIME` | When `fly_profiling()` last ran for this customer |
-| `profiling_category` | `VARCHAR(50)` | `FTB1` / `FTB2` (initial), `ENHANCED_N` (after limit increase), or fraud-adjusted labels such as `FTB1_FRAUD_reject`, `FTB1_FRAUD_manual_review`, `FTB1_FRAUD_reduced` |
+| `profiling_category` | `VARCHAR(50)` | `FTB1` / `FTB2` (initial), `ENHANCED_N` (after a successful limit increase), `not_enhanced` (enhancement evaluated but limit unchanged), or fraud-adjusted labels such as `FTB1_FRAUD_reject`, `FTB1_FRAUD_manual_review`, `FTB1_FRAUD_reduced` |
 
 > **Note:** Early deployments stored `mobile_number` and `credit_limit` as `DECIMAL(18,4)`, causing values to display with thousands-separator commas (e.g. `254,722,123,456.0000`). Migrations `0014` and `0015` correct this automatically — `0015` also strips any `.0000` decimal artefacts left in existing rows after the column type change.
 
@@ -343,7 +344,7 @@ Subscribers with `debt_to_income_ratio > 0.50` (50 %) are hard-gated to `not_qua
 | `enhancement_pct` | `DECIMAL(5,2)` | Matrix percentage (e.g. `40.00` = 40 %) |
 | `proposed_limit` | `INT` | Matrix target — `ROUND(current_limit × (1 + enhancement_pct / 100))`; populated whenever a matrix cell exists, regardless of eligibility |
 | `enhanced_limit` | `INT` | Resulting limit after this evaluation — equals `proposed_limit` when eligible, otherwise `current_limit` (no increase applied) |
-| `profiling_category` | `VARCHAR(20)` | Revisioned label when applied — `ENHANCED_1`, `ENHANCED_2`, … (incremented from prior applied rows) |
+| `profiling_category` | `VARCHAR(50)` | Dry run (`p_apply = 0`): `evaluation_enhanced` or `evaluation_not_enhanced`. Apply run (`p_apply = 1`): `ENHANCED_N` if increased, `not_enhanced` if not |
 | `is_eligible` | `TINYINT(1)` | `1` only when all six eligibility gates pass and a matrix cell exists |
 | `eligibility_detail` | `TEXT` | Semicolon-separated reasons when ineligible |
 | `applied` | `TINYINT(1)` | `1` when `p_apply = 1` and `proposed_limit` was written to `customer_credit_limit` |
@@ -565,7 +566,7 @@ CALL sp_apply_credit_limit_enhancement(p_mobile_number, p_apply);
 | Parameter | Type | Description |
 |---|---|---|
 | `p_mobile_number` | `VARCHAR(20)` | Customer mobile (`254xxx`), or `NULL` for batch (all customers with `credit_limit >= 1000`) |
-| `p_apply` | `TINYINT(1)` | `0` or `NULL` = evaluate only; `1` = also write `proposed_limit` to `customer_credit_limit` (both parameters are required — MySQL does not support parameter defaults) |
+| `p_apply` | `TINYINT(1)` | `0` or `NULL` = evaluate only (`evaluation_enhanced` / `evaluation_not_enhanced` on audit row; `customer_credit_limit` unchanged); `1` = apply (`ENHANCED_N` or `not_enhanced` on `customer_credit_limit`) |
 
 **Data sources:**
 
@@ -674,10 +675,18 @@ ORDER  BY e.evaluated_at DESC, r.reason_rank;
 When `p_apply = 1` and the customer is eligible, the procedure:
 
 - Deletes the prior `customer_credit_limit` row for that mobile number
-- Inserts a new row with `credit_limit = proposed_limit` and `profiling_category = ENHANCED_N` (revision increments from the last applied enhancement)
-- Marks the evaluation row as `applied = 1`
+- Inserts a new row with `credit_limit = proposed_limit` and `profiling_category = ENHANCED_N` (revision increments from the last applied `ENHANCED_*` row)
+- Marks the evaluation row as `applied = 1` and sets its `profiling_category` to the same `ENHANCED_N`
 
-Table DDL: migrations `0020`, `0022`, and `0024`. Procedure: `db/procedures/sp_apply_credit_limit_enhancement.sql`.
+When `p_apply = 1` and the customer is **not** increased (any failed gate, DTI limit, no matrix cell, etc.), the procedure:
+
+- Leaves `credit_limit` unchanged on `customer_credit_limit`
+- Sets `profiling_category = not_enhanced` and refreshes `profiling_date`
+- Leaves the evaluation row as `applied = 0` with `profiling_category = not_enhanced`
+
+When `p_apply = 0`, the audit row is labelled `evaluation_enhanced` (would qualify for an increase) or `evaluation_not_enhanced` (would not). `customer_credit_limit` is not modified.
+
+Table DDL: migrations `0020`, `0022`, `0024`, and `0025`. Procedure: `db/procedures/sp_apply_credit_limit_enhancement.sql`.
 
 ### LEM rejection reasons
 

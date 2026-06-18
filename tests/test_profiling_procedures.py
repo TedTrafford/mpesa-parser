@@ -207,6 +207,9 @@ class TestProcedureSources:
         assert "enhancement_pct" in enhancement_sql
         assert "proposed_limit" in enhancement_sql
         assert "profiling_category" in enhancement_sql
+        assert "not_enhanced" in enhancement_sql
+        assert "evaluation_enhanced" in enhancement_sql
+        assert "evaluation_not_enhanced" in enhancement_sql
         assert "ENHANCED_" in enhancement_sql
         assert "closed_loan_count >= 3" in enhancement_sql
         assert "staging.credit_profiles" not in enhancement_sql
