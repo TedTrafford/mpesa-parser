@@ -207,6 +207,7 @@ class TestProcedureSources:
         assert "enhancement_pct" in enhancement_sql
         assert "profiling_category" in enhancement_sql
         assert "ENHANCED_" in enhancement_sql
+        assert "closed_loan_count >= 3" in enhancement_sql
         assert "staging.credit_profiles" not in enhancement_sql
         assert "customer_credit_limit ccl" in enhancement_sql
         assert "INSERT INTO customer_credit_limit" in enhancement_sql
@@ -223,6 +224,7 @@ class TestProcedureSources:
             "LEM_EXCESSIVE_ARREARS",
             "LEM_NO_CLOSED_LOAN",
             "LEM_LATE_LOAN_REPAYMENT",
+            "LEM_INSUFFICIENT_CLOSED_LOANS",
             "LEM_HIGH_DEBT_TO_INCOME",
             "LEM_LIMIT_TENURE_INSUFFICIENT",
             "LEM_NO_MATRIX_CELL",
