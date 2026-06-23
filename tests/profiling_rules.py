@@ -7,16 +7,19 @@ without a live MySQL connection.
 
 from __future__ import annotations
 
+# Minimum statement history (days) before fly_profiling assigns a credit limit.
+MIN_AGE_DAYS_FOR_LIMIT = 180
+
 # (risk_segment, turnover_segment) -> credit limit (KES)
 CREDIT_LIMIT_MATRIX: dict[tuple[int, int], int] = {
-    (8, 8): 8000,
-    (8, 7): 7000,
-    (8, 6): 6000,
+    (8, 8): 5000,
+    (8, 7): 5000,
+    (8, 6): 5000,
     (8, 5): 5000,
-    (7, 8): 8000,
-    (7, 7): 6000,
+    (7, 8): 5000,
+    (7, 7): 5000,
     (7, 6): 5000,
-    (6, 8): 6000,
+    (6, 8): 5000,
     (6, 7): 5000,
     (5, 8): 5000,
 }
@@ -36,7 +39,7 @@ def credit_limit(
     turnover_segment: int,
 ) -> int:
     """Return the credit limit for a risk/turnover combination."""
-    if age_days is None or age_days < 90:
+    if age_days is None or age_days < MIN_AGE_DAYS_FOR_LIMIT:
         return 0
     return CREDIT_LIMIT_MATRIX.get((risk_segment, turnover_segment), 0)
 
