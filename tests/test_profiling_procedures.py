@@ -13,6 +13,7 @@ import pytest
 
 from tests.profiling_rules import (
     CREDIT_LIMIT_MATRIX,
+    MIN_AGE_DAYS_FOR_LIMIT,
     MIN_TURNOVER_BY_RISK,
     applies_high_credit_risk,
     applies_low_turnover,
@@ -40,20 +41,20 @@ class TestCreditLimitMatrix:
     @pytest.mark.parametrize(
         ("risk", "turnover", "expected"),
         [
-            (8, 8, 8000),
-            (8, 7, 7000),
-            (8, 6, 6000),
+            (8, 8, 5000),
+            (8, 7, 5000),
+            (8, 6, 5000),
             (8, 5, 5000),
-            (7, 8, 8000),
-            (7, 7, 6000),
+            (7, 8, 5000),
+            (7, 7, 5000),
             (7, 6, 5000),
-            (6, 8, 6000),
+            (6, 8, 5000),
             (6, 7, 5000),
             (5, 8, 5000),
         ],
     )
     def test_qualifying_combinations(self, risk, turnover, expected):
-        assert credit_limit(90, risk, turnover) == expected
+        assert credit_limit(MIN_AGE_DAYS_FOR_LIMIT, risk, turnover) == expected
 
     @pytest.mark.parametrize(
         ("risk", "turnover"),
@@ -76,7 +77,7 @@ class TestCreditLimitMatrix:
         assert credit_limit(90, risk, turnover) == 0
 
     def test_insufficient_history_returns_zero(self):
-        assert credit_limit(89, 8, 8) == 0
+        assert credit_limit(MIN_AGE_DAYS_FOR_LIMIT - 1, 8, 8) == 0
         assert credit_limit(None, 8, 8) == 0
 
 
@@ -86,7 +87,7 @@ class TestCreditLimitMatrix:
 class TestModelCategoryAlignment:
     def test_qualified_only_when_limit_is_non_zero(self):
         for (risk, turnover), limit in CREDIT_LIMIT_MATRIX.items():
-            category = model_category(90, risk, turnover)
+            category = model_category(MIN_AGE_DAYS_FOR_LIMIT, risk, turnover)
             assert category == "qualified", f"({risk}, {turnover}) limit={limit}"
             assert limit > 0
 
@@ -108,10 +109,20 @@ class TestModelCategoryAlignment:
         assert model_category(90, risk, turnover) == "not_qualified"
 
     def test_dti_hard_gate_overrides_qualification(self):
-        assert model_category(90, 8, 8, debt_to_income_ratio=0.51) == "not_qualified"
+        assert (
+            model_category(
+                MIN_AGE_DAYS_FOR_LIMIT, 8, 8, debt_to_income_ratio=0.51
+            )
+            == "not_qualified"
+        )
 
     def test_dti_at_threshold_does_not_override(self):
-        assert model_category(90, 8, 8, debt_to_income_ratio=0.50) == "qualified"
+        assert (
+            model_category(
+                MIN_AGE_DAYS_FOR_LIMIT, 8, 8, debt_to_income_ratio=0.50
+            )
+            == "qualified"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +153,8 @@ class TestRejectionReasonThresholds:
 
     def test_min_turnover_map_matches_credit_matrix(self):
         for risk, minimum in MIN_TURNOVER_BY_RISK.items():
-            assert credit_limit(90, risk, minimum) > 0
-            assert credit_limit(90, risk, minimum - 1) == 0
+            assert credit_limit(MIN_AGE_DAYS_FOR_LIMIT, risk, minimum) > 0
+            assert credit_limit(MIN_AGE_DAYS_FOR_LIMIT, risk, minimum - 1) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -244,8 +255,10 @@ class TestProcedureSources:
         assert "risk_segment = 3 AND turnover_segment IN (7, 8)" not in fly_profiling_sql
 
     def test_fly_profiling_credit_limit_matrix_in_sql(self, fly_profiling_sql):
+        assert f"age_days >= {MIN_AGE_DAYS_FOR_LIMIT}" in fly_profiling_sql
         for (risk, turnover), limit in CREDIT_LIMIT_MATRIX.items():
             pattern = (
+                rf"age_days\s*>=\s*{MIN_AGE_DAYS_FOR_LIMIT}\s+AND\s+"
                 rf"risk_segment\s*=\s*{risk}\s+AND\s+turnover_segment\s*=\s*"
                 rf"{turnover}\s+THEN\s+{limit}"
             )
