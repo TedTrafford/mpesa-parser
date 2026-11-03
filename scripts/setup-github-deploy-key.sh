@@ -23,7 +23,7 @@ if [[ -f "${KEY_PATH}" || -f "${KEY_PATH}.pub" ]]; then
 fi
 
 echo "Generating Ed25519 deploy key (no passphrase)..."
-ssh-keygen -t ed25519 -C "github-actions-aleza-deploy" -f "${KEY_PATH}" -N ""
+ssh-keygen -t ed25519 -C "github-actions-deploy" -f "${KEY_PATH}" -N ""
 
 echo ""
 echo "============================================================"
