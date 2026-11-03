@@ -782,7 +782,7 @@ Then on **65.20.86.247** (as the same user as `SSH_USER`, e.g. `root`):
 ```bash
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
 # paste the public key line from the script output:
-echo "ssh-ed25519 AAAA... github-actions-aleza-deploy" >> ~/.ssh/authorized_keys
+echo "ssh-ed25519 AAAA... github-actions-deploy" >> ~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
 ```
 
